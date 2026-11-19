@@ -40,9 +40,13 @@ typedef struct app {
     // background work such as starting a nightly download. Keep it quick.
     void (*background)(void);
 
-    // Optional. The app is leaving the screen (BACK out of it, or MENU). Stop anything
+    // Optional. The app is leaving the screen (BACK out of it, or HOME). Stop anything
     // that should only run while it's open, e.g. the Transfer app's web server.
     void (*close)(void);
+
+    // true: never reopened by itself at power-on (power-on shows the menu instead), e.g.
+    // Transfer, whose web server should only run when opened on purpose
+    bool no_resume;
 } app_t;
 
 // The app on screen, or NULL while the menu is showing (set by main.c)

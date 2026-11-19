@@ -2,7 +2,7 @@
 
 #include <stdbool.h>
 #include <string.h>                     // memcmp(), memcpy()
-#include "epd_2in13.h"                  // epd_draw_pixel(), epd_draw_rect()
+#include "epd.h"                  // epd_draw_pixel(), epd_draw_rect()
 
 // unifont16.bin, built by tools/make_font.py and linked into the firmware (EMBED_FILES)
 extern const uint8_t font_start[] asm("_binary_unifont16_bin_start");

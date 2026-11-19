@@ -1,4 +1,4 @@
-#include "epd_2in13.h"
+#include "epd.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -9,25 +9,20 @@
 #include "esp_log.h"
 #include "sdkconfig.h"                  // CONFIG_DISPLAY_ROTATE_180
 #include "epd_pins.h"                   // PIN_* wiring
-#include "jd79661_lut.h"                // waveforms for the JD79661 controller
 
 #define EPD_SPI_HOST    SPI2_HOST
 #define EPD_SPI_HZ      (4 * 1000 * 1000)
 #define BUSY_TIMEOUT_MS 10000
 
-/* Native panel memory is portrait: 122 px wide (padded to 128), 250 rows */
-#define NATIVE_W        122
-#define NATIVE_H        250
+/* Native panel memory is portrait: 128 px wide, 296 rows */
+#define NATIVE_W        128
+#define NATIVE_H        296
 #define LINE_BYTES      ((NATIVE_W + 7) / 8)
 #define BUF_SIZE        (LINE_BYTES * NATIVE_H)
 
 static const char *TAG = "epd";
 static spi_device_handle_t spi;
 static uint8_t frame[BUF_SIZE];   /* 1 = white, 0 = black, MSB = leftmost */
-
-/* Elecrow ships this board with one of two controllers; epd_init() finds out which */
-typedef enum { CTRL_UNKNOWN, CTRL_SSD1680, CTRL_JD79661 } controller_t;
-static controller_t ctrl = CTRL_UNKNOWN;
 
 /* Classic 5x7 font, ASCII 0x20-0x7E, column-major, LSB = top row */
 static const uint8_t font5x7[][5] = {
@@ -89,17 +84,15 @@ static void epd_data_buf(const uint8_t *buf, size_t len)
     epd_write(true, buf, len);
 }
 
-/* Waits while the controller is working. Returns roughly how long, in ms.
- * BUSY is HIGH while busy on the SSD1680, LOW while busy on the JD79661. */
+/* Waits while the controller is working (BUSY high). Returns roughly how long, in ms. */
 static int epd_wait_busy(void)
 {
-    int busy_level = (ctrl == CTRL_JD79661) ? 0 : 1;
     int waited = 0;
-    while (gpio_get_level(PIN_BUSY) == busy_level) {
+    while (gpio_get_level(PIN_BUSY) == 1) {
         vTaskDelay(pdMS_TO_TICKS(10));
         waited += 10;
         if (waited >= BUSY_TIMEOUT_MS) {
-            ESP_LOGW(TAG, "BUSY pin stuck, check wiring");
+            ESP_LOGW(TAG, "BUSY pin stuck, check the panel's ribbon cable");
             break;
         }
     }
@@ -113,36 +106,46 @@ static void epd_reset(void)
     gpio_set_level(PIN_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(100));                     /* JD79661 wants >= 100 ms after reset */
+    vTaskDelay(pdMS_TO_TICKS(20));
 }
 
-/* A real full refresh keeps the panel busy for ~1-3 s. Back instantly = the panel never
- * started: it isn't receiving commands (power, wiring) or BUSY isn't connected. */
+/* A real full refresh keeps the panel busy for ~2-3 s. Back instantly = the panel never
+ * started: it isn't receiving commands (power, ribbon cable) or BUSY isn't connected. */
 static void check_full_refresh(int ms)
 {
     if (ms < 100) {
-        ESP_LOGW(TAG, "full refresh: panel didn't respond (never busy), check power/wiring");
+        ESP_LOGW(TAG, "full refresh: panel didn't respond (never busy), check power/cable");
     } else {
         ESP_LOGI(TAG, "full refresh took %d ms", ms);
     }
 }
 
-/* GPIO + SPI setup, display power on; only needs to happen once per boot */
+/* Switches the shared rail on, parks the LoRa radio, and sets up GPIO + SPI. Runs on the
+ * first epd_init() after boot and again after epd_power_down(). */
+static bool bus_ready = false;
+
 static void epd_bus_init(void)
 {
-    static bool ready = false;
-    if (ready) {
+    if (bus_ready) {
         return;
     }
-    ready = true;
+    bus_ready = true;
 
+    // Radio chip select high before the rail comes up, so the radio never takes display
+    // traffic as its own; its reset released so it idles in standby
+    gpio_set_level(PIN_LORA_NSS, 1);
+    gpio_set_level(PIN_LORA_RST, 1);
+    gpio_set_level(PIN_PWR, 0);
     gpio_config_t out = {
-        .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_RST) | (1ULL << PIN_PWR),
+        .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_RST) | (1ULL << PIN_PWR) |
+                        (1ULL << PIN_LORA_NSS) | (1ULL << PIN_LORA_RST),
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&out));
-    gpio_set_level(PIN_PWR, 1);                         /* switch the display's 3.3 V on */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(PIN_LORA_NSS, 1);
+    gpio_set_level(PIN_LORA_RST, 1);
+    gpio_set_level(PIN_PWR, 1);                         /* switch the peripheral rail on */
+    vTaskDelay(pdMS_TO_TICKS(50));                      /* let the rail settle */
     gpio_config_t in = {
         .pin_bit_mask = 1ULL << PIN_BUSY,
         .mode = GPIO_MODE_INPUT,
@@ -151,7 +154,7 @@ static void epd_bus_init(void)
 
     spi_bus_config_t bus = {
         .mosi_io_num = PIN_MOSI,
-        .miso_io_num = -1,
+        .miso_io_num = -1,                              /* only the radio uses MISO */
         .sclk_io_num = PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
@@ -167,14 +170,7 @@ static void epd_bus_init(void)
     ESP_ERROR_CHECK(spi_bus_add_device(EPD_SPI_HOST, &dev, &spi));
 }
 
-/* After a hardware reset the controller sits idle, and the two report idle differently:
- * SSD1680 BUSY low, JD79661 BUSY high. */
-static controller_t detect_controller(void)
-{
-    return gpio_get_level(PIN_BUSY) ? CTRL_JD79661 : CTRL_SSD1680;
-}
-
-/* ---------- SSD1680 (earlier boards) ---------- */
+/* ---------- SSD16xx controller ---------- */
 
 /* RAM window = whole panel, address counters back at the start */
 static void ssd_set_full_window(void)
@@ -195,21 +191,25 @@ static void ssd_set_full_window(void)
     epd_data(0x00);
 }
 
+/* Gate count, scan direction and full window: needed after reset and before each partial */
+static void ssd_set_geometry(void)
+{
+    epd_cmd(0x01);                  /* driver output control: 296 gate lines */
+    epd_data((NATIVE_H - 1) & 0xFF);
+    epd_data((NATIVE_H - 1) >> 8);
+    epd_data(0x00);
+    epd_cmd(0x11);                  /* data entry: X+, Y+ */
+    epd_data(0x03);
+    ssd_set_full_window();
+}
+
 static void ssd_init(void)
 {
     epd_wait_busy();
     epd_cmd(0x12);                  /* software reset */
     epd_wait_busy();
 
-    epd_cmd(0x01);                  /* driver output control: 250 gate lines */
-    epd_data((NATIVE_H - 1) & 0xFF);
-    epd_data((NATIVE_H - 1) >> 8);
-    epd_data(0x00);
-
-    epd_cmd(0x11);                  /* data entry: X+, Y+ */
-    epd_data(0x03);
-
-    ssd_set_full_window();
+    ssd_set_geometry();
 
     epd_cmd(0x3C);                  /* border waveform */
     epd_data(0x05);
@@ -219,179 +219,6 @@ static void ssd_init(void)
     epd_cmd(0x18);                  /* use internal temperature sensor */
     epd_data(0x80);
     epd_wait_busy();
-}
-
-static void ssd_display(void)
-{
-    /* Write the frame to both RAMs: 0x24 is the new image, 0x26 is the
-     * "previous" image that a later partial refresh compares against. */
-    ssd_set_full_window();
-    epd_cmd(0x24);
-    epd_data_buf(frame, BUF_SIZE);
-    ssd_set_full_window();
-    epd_cmd(0x26);
-    epd_data_buf(frame, BUF_SIZE);
-
-    epd_cmd(0x22);                  /* full refresh */
-    epd_data(0xF7);
-    epd_cmd(0x20);
-    check_full_refresh(epd_wait_busy());
-}
-
-static void ssd_display_partial(void)
-{
-    epd_cmd(0x3C);                  /* border waveform: keep the border as-is */
-    epd_data(0x80);
-    epd_cmd(0x01);                  /* driver output control: 250 gate lines */
-    epd_data((NATIVE_H - 1) & 0xFF);
-    epd_data((NATIVE_H - 1) >> 8);
-    epd_data(0x00);
-    epd_cmd(0x11);                  /* data entry: X+, Y+ */
-    epd_data(0x03);
-
-    ssd_set_full_window();
-    epd_cmd(0x24);                  /* new image; the panel only flips pixels that differ from 0x26 */
-    epd_data_buf(frame, BUF_SIZE);
-
-    epd_cmd(0x22);                  /* partial refresh (no full-screen flashing) */
-    epd_data(0xFF);
-    epd_cmd(0x20);
-    epd_wait_busy();
-
-    ssd_set_full_window();          /* what's on screen now becomes the next "previous" image */
-    epd_cmd(0x26);
-    epd_data_buf(frame, BUF_SIZE);
-}
-
-/* ---------- JD79661 (newer boards) ----------
- * Follows the sequence in Elecrow's v1.2 example, which is what the chip expects:
- *   - once: reset, configure, both image buffers white (0x10, 0x13), one refresh
- *   - every update: only the NEW image to 0x13 (1 = white), one waveform upload, refresh
- * The chip keeps the "old" image itself; the host never writes 0x10 again. Every waveform
- * upload swaps the 0x22/0x23 tables (see jd_upload_lut()), so exactly one upload must
- * happen per refresh, and the chip isn't reset again after the first init.
- * Rows go out last to first (otherwise the picture is mirrored left to right). */
-
-static bool jd_ready = false;       /* configured and cleared since power-on / deep sleep */
-
-static bool lut_swap = false;       /* Elecrow alternates the R22/R23 tables every refresh */
-
-static void jd_upload_lut(const uint8_t *r20, const uint8_t *r21, const uint8_t *r22,
-                          const uint8_t *r23, const uint8_t *r24)
-{
-    epd_cmd(0x20);
-    epd_data_buf(r20, 56);
-    epd_cmd(0x21);
-    epd_data_buf(r21, 56);
-    epd_cmd(0x24);
-    epd_data_buf(r24, 56);
-    epd_cmd(lut_swap ? 0x23 : 0x22);
-    epd_data_buf(r22, 56);
-    epd_cmd(lut_swap ? 0x22 : 0x23);
-    epd_data_buf(r23, 56);
-    lut_swap = !lut_swap;
-}
-
-/* Sends our frame as the new image (0x13), rows last to first. Bits go as they are: with this
- * sequence the chip's data is 1 = white, like our frame (checked on hardware; Elecrow's
- * drawing code suggests the opposite, but its 0xFF "clear" and the panel agree on white). */
-static void jd_send_frame(void)
-{
-    static uint8_t chunk[16 * LINE_BYTES];                  /* 16 rows per SPI transfer */
-    epd_cmd(0x13);
-    for (int row = 0; row < NATIVE_H; ) {
-        int n = 0;
-        for (; n < 16 && row < NATIVE_H; n++, row++) {
-            const uint8_t *src = &frame[(NATIVE_H - 1 - row) * LINE_BYTES];
-            memcpy(&chunk[n * LINE_BYTES], src, LINE_BYTES);
-        }
-        epd_data_buf(chunk, n * LINE_BYTES);
-    }
-}
-
-/* Fills an image buffer (0x10 or 0x13) with one byte value */
-static void jd_fill(uint8_t cmd, uint8_t value)
-{
-    static uint8_t chunk[256];
-    memset(chunk, value, sizeof(chunk));
-    epd_cmd(cmd);
-    for (int i = 0; i < BUF_SIZE; i += sizeof(chunk)) {
-        int n = (BUF_SIZE - i < (int)sizeof(chunk)) ? BUF_SIZE - i : (int)sizeof(chunk);
-        epd_data_buf(chunk, n);
-    }
-}
-
-static int jd_refresh(void);
-
-static void jd_init(void)
-{
-    epd_cmd(0x00);                  /* panel setting: scan directions */
-    epd_data(0xF7);
-    epd_data(0x8A);
-    epd_cmd(0x01);                  /* power setting */
-    epd_data(0x03);
-    epd_data(0x00);
-    epd_data(0x3F);
-    epd_data(0x3F);
-    epd_data(0x03);
-    epd_cmd(0x03);                  /* power off sequence */
-    epd_data(0x00);
-    epd_cmd(0x06);                  /* booster soft start */
-    epd_data(0x27);
-    epd_data(0x27);
-    epd_data(0x2F);
-    epd_cmd(0x30);                  /* PLL / frame rate */
-    epd_data(0x0D);
-    epd_cmd(0x60);                  /* TCON */
-    epd_data(0x22);
-    epd_cmd(0x82);                  /* VCOM DC */
-    epd_data(0x07);
-    epd_cmd(0xE3);                  /* power saving */
-    epd_data(0x88);
-    epd_cmd(0x41);                  /* temperature sensor: internal */
-    epd_data(0x00);
-    epd_cmd(0x61);                  /* resolution: 128 x 250 */
-    epd_data(0x80);
-    epd_data(0x00);
-    epd_data(0xFA);
-    epd_cmd(0x65);                  /* gate/source start: 0 */
-    epd_data(0x00);
-    epd_data(0x00);
-    epd_data(0x00);
-    epd_cmd(0x50);                  /* VCOM + data interval */
-    epd_data(0xB7);
-
-    // Clear: both image buffers white, then one full refresh (Elecrow's EPD_Clear + EPD_Update)
-    jd_fill(0x10, 0xFF);
-    jd_fill(0x13, 0xFF);
-    jd_upload_lut(lut_R20_GC, lut_R21_GC, lut_R22_GC, lut_R23_GC, lut_R24_GC);
-    jd_refresh();
-    jd_ready = true;
-}
-
-static int jd_refresh(void)
-{
-    epd_cmd(0x17);                  /* auto sequence: power on, refresh, power off */
-    epd_data(0xA5);
-    return epd_wait_busy();
-}
-
-static void jd_display(void)
-{
-    epd_cmd(0x50);                  /* VCOM + data interval, as Elecrow sets it before each image */
-    epd_data(0xD7);
-    jd_send_frame();
-    jd_upload_lut(lut_R20_GC, lut_R21_GC, lut_R22_GC, lut_R23_GC, lut_R24_GC);  /* full ("GC") */
-    check_full_refresh(jd_refresh());
-}
-
-static void jd_display_partial(void)
-{
-    epd_cmd(0x50);
-    epd_data(0xD7);
-    jd_send_frame();
-    jd_upload_lut(lut_R20_DU, lut_R21_DU, lut_R22_DU, lut_R23_DU, lut_R24_DU);  /* fast ("DU"): changed pixels only */
-    jd_refresh();
 }
 
 /* ---------- panel control ---------- */
@@ -407,35 +234,31 @@ void epd_init(void)
 {
     epd_bus_init();
     asleep = false;
-
-    if (ctrl == CTRL_JD79661 && jd_ready) {
-        epd_clear(EPD_WHITE);       /* JD79661: configured once; resetting it again would lose
-                                       its internal old/new image state */
-        return;
-    }
-
     epd_reset();
-    if (ctrl == CTRL_UNKNOWN) {
-        ctrl = detect_controller();
-        ESP_LOGI(TAG, "controller: %s", ctrl == CTRL_JD79661 ? "JD79661" : "SSD1680");
-    }
-    if (ctrl == CTRL_JD79661) {
-        jd_init();
-    } else {
-        ssd_init();
-    }
-
+    ssd_init();
     epd_clear(EPD_WHITE);
     ESP_LOGI(TAG, "initialized");
 }
 
+void epd_display_base(void)
+{
+    /* Write the frame to both RAMs: 0x24 is the new image, 0x26 is the
+     * "previous" image that a later partial refresh compares against. */
+    ssd_set_full_window();
+    epd_cmd(0x24);
+    epd_data_buf(frame, BUF_SIZE);
+    ssd_set_full_window();
+    epd_cmd(0x26);
+    epd_data_buf(frame, BUF_SIZE);
+}
+
 void epd_display(void)
 {
-    if (ctrl == CTRL_JD79661) {
-        jd_display();
-    } else {
-        ssd_display();
-    }
+    epd_display_base();
+    epd_cmd(0x22);                  /* full refresh */
+    epd_data(0xF7);
+    epd_cmd(0x20);
+    check_full_refresh(epd_wait_busy());
 }
 
 void epd_display_partial(void)
@@ -446,24 +269,62 @@ void epd_display_partial(void)
         ESP_LOGW(TAG, "partial refresh skipped: panel is asleep");
         return;
     }
-    if (ctrl == CTRL_JD79661) {
-        jd_display_partial();
-    } else {
-        ssd_display_partial();
-    }
+    epd_cmd(0x3C);                  /* border waveform: keep the border as-is */
+    epd_data(0x80);
+    ssd_set_geometry();
+    epd_cmd(0x24);                  /* new image; the panel only flips pixels that differ from 0x26 */
+    epd_data_buf(frame, BUF_SIZE);
+
+    epd_cmd(0x22);                  /* partial refresh (no full-screen flashing) */
+    epd_data(0xFF);
+    epd_cmd(0x20);
+    epd_wait_busy();
+
+    ssd_set_full_window();          /* what's on screen now becomes the next "previous" image */
+    epd_cmd(0x26);
+    epd_data_buf(frame, BUF_SIZE);
 }
 
 void epd_sleep(void)
 {
-    if (ctrl == CTRL_JD79661) {
-        epd_cmd(0x07);              /* deep sleep */
-        epd_data(0xA5);
-        jd_ready = false;           /* waking needs a reset and a fresh init */
-    } else {
-        epd_cmd(0x10);              /* deep sleep mode 1: RAM is kept, wake with a reset */
-        epd_data(0x01);
+    if (!bus_ready) {
+        return;
+    }
+    epd_cmd(0x10);                  /* deep sleep mode 1: RAM is kept, wake with a reset */
+    epd_data(0x01);
+    asleep = true;
+}
+
+void epd_power_down(void)
+{
+    if (bus_ready) {
+        epd_wait_busy();
+        epd_sleep();
+        spi_bus_remove_device(spi);
+        spi_bus_free(EPD_SPI_HOST);
+        bus_ready = false;
     }
     asleep = true;
+
+    // Float everything that leads to the rail (an output left high would feed the unpowered
+    // chips through their protection diodes), then let the rail's pull-down switch it off
+    static const int pins[] = {
+        PIN_MOSI, PIN_SCLK, PIN_CS, PIN_DC, PIN_RST, PIN_BUSY,
+        PIN_LORA_NSS, PIN_LORA_RST, PIN_LORA_BUSY, PIN_LORA_DIO1, PIN_SPI_MISO,
+        PIN_SD_CMD, PIN_SD_D0, PIN_SD_CLK, PIN_RGB_LED, PIN_PWR,
+    };
+    uint64_t mask = 0;
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        mask |= 1ULL << pins[i];
+    }
+    gpio_set_level(PIN_PWR, 0);
+    gpio_config_t off = {
+        .pin_bit_mask = mask,
+        .mode = GPIO_MODE_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    gpio_config(&off);
 }
 
 /* ---------- drawing ---------- */
@@ -473,20 +334,56 @@ void epd_clear(uint8_t color)
     memset(frame, color ? 0xFF : 0x00, sizeof(frame));
 }
 
+#ifdef CONFIG_DISPLAY_ROTATE_180
+static bool rotated = true;                         /* upside down (menuconfig default; Settings app) */
+#else
+static bool rotated = false;
+#endif
+static bool vertical = false;                       /* inside epd_vertical_begin() / _end() */
+static int vertical_x, vertical_y;                  /* screen position of the vertical origin */
+
+void epd_set_rotated(bool on)
+{
+    rotated = on;
+}
+
+bool epd_rotated(void)
+{
+    return rotated;
+}
+
+void epd_vertical_begin(int x, int y)
+{
+    vertical = true;
+    vertical_x = x;
+    vertical_y = y;
+}
+
+void epd_vertical_end(void)
+{
+    vertical = false;
+}
+
 void epd_draw_pixel(int x, int y, uint8_t color)
 {
+    if (vertical) {                 /* quarter turn counter-clockwise: drawing x runs up the screen */
+        int sx = vertical_x + y;
+        y = vertical_y - x;
+        x = sx;
+    }
     if (x < 0 || x >= EPD_WIDTH || y < 0 || y >= EPD_HEIGHT) {
         return;
     }
     /* Rotate landscape coordinates onto the portrait panel memory. The default is the
-     * orientation Elecrow's examples use on the CrowPanel 2.13"; menuconfig can flip it. */
-#if CONFIG_DISPLAY_ROTATE_180
-    int nx = NATIVE_W - 1 - y;
-    int ny = x;
-#else
-    int nx = y;
-    int ny = NATIVE_H - 1 - x;
-#endif
+     * orientation Waveshare's examples use on this board. */
+    int nx, ny;
+    if (rotated) {
+        nx = NATIVE_W - 1 - y;
+        ny = x;
+    } else {
+        nx = y;
+        ny = NATIVE_H - 1 - x;
+    }
     uint8_t mask = 0x80 >> (nx % 8);
     uint8_t *byte = &frame[ny * LINE_BYTES + nx / 8];
     if (color) {

@@ -1,6 +1,9 @@
 /*
  * Reader screens.
  *
+ *  Lists have their title ("Books", "Chapters") and "n/total" in the title bar on the left
+ *  (ui_sidebar.h), reading bottom to top; drawn here as a top line for brevity.
+ *
  *  LIBRARY                                     PAGE
  *  +--------------------------------------+    +--------------------------------------+
  *  | Books                            2/5 |    | 第一章                                |
@@ -13,7 +16,7 @@
  *  | Add books with the Transfer app      |    | Ch 3/24  45%              12/340 12% |
  *  +--------------------------------------+    +--------------------------------------+
  *
- *  CHAPTERS (press the wheel while reading)
+ *  CHAPTERS (press while reading)
  *  +--------------------------------------+
  *  | Chapters                        3/24 |
  *  |--------------------------------------|
@@ -28,7 +31,7 @@
 #include <stdint.h>
 #include "books.h"                      // book_info_t
 
-#define READER_UI_ROWS 4                // one-line rows per list screen (holding the wheel jumps this far)
+#define READER_UI_ROWS 5                // one-line rows per list screen (holding left / right jumps this far)
 
 // One chapter: where it starts and its title (stored as-is in <ID>.CHP)
 typedef struct {

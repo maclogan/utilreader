@@ -1,7 +1,7 @@
 #include "reader_layout.h"
 
 #include "books.h"                      // BOOK_CHAPTER_MARK
-#include "epd_2in13.h"                  // EPD_WIDTH, drawing
+#include "epd.h"                  // EPD_WIDTH, drawing
 #include "font16.h"                     // glyphs and widths
 
 #define X0          4                   // left margin

@@ -2,7 +2,7 @@
 
 #include <stdio.h>                      // snprintf()
 #include <time.h>                       // time(), gmtime_r()
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 
 #define CLOCK_24H       0               // 1 = "17:05", 0 = "5:05 PM"
 #define TIME_SCALE      7               // digit size: the 5x7 font at 7x = 35x49 px per digit

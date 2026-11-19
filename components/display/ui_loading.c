@@ -1,6 +1,6 @@
 #include "ui_loading.h"
 
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 
 #define BOX_W   100                     // loading box size (pixels)
 #define BOX_H   30

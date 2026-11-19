@@ -13,7 +13,7 @@ Saved words are stored by the `review` component (`components/review`).
 
 ## Screens and buttons
 
-| Screen | Wheel up / down (LEFT / RIGHT) | Hold wheel up / down | Press wheel (SELECT) | EXIT |
+| Screen | Left / right | Hold left / right | Press (SELECT) | BACK |
 |---|---|---|---|---|
 | **Menu** | Move | | Open item (Level: cycle HSK 1-6) | Main menu |
 | **Reader** | First press selects the page's first word; then previous / next word (continues onto the next page) | Previous / next page (nothing selected) | Save / un-save the selected word | Story menu |

@@ -13,11 +13,11 @@ The menu tile is called **Cards**.
 
 | Screen | Shows | Buttons |
 |---|---|---|
-| Front | The word, as large as fits (48 px characters for up to 5) | Press the wheel (SELECT): show the answer |
-| Back | Word, pinyin, meaning | Wheel up (LEFT): **again** · wheel down (RIGHT): **got it** |
+| Front | The word, as large as fits (48 px characters for up to 5) | Press the 5-way (SELECT): show the answer |
+| Back | Word, pinyin, meaning | Left (LEFT): **again** · right (RIGHT): **got it** |
 | All done | Deck size and when the next card is due | |
 
-EXIT (or MENU) leaves at any time; progress is saved after every answer, so nothing is lost.
+BACK (or HOME) leaves at any time; progress is saved after every answer, so nothing is lost.
 The header counts the cards left in this session.
 
 ## How scheduling works (Leitner boxes)

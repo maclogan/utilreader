@@ -2,16 +2,16 @@
 
 | File | What it does |
 |---|---|
-| `epd_2in13.c/.h` | Driver for the 2.13" 250×122 panel (SSD1680 or JD79661): power, frame buffer, drawing, refresh |
-| `jd79661_lut.h` | Waveform tables for the JD79661, generated from Elecrow's example driver |
+| `epd.c/.h` | Driver for the 2.9" 296×128 panel (SSD16xx): power, frame buffer, drawing, refresh |
 | `epd_pins.h`, `epd_diag.c` | Pin numbers; the optional wiring diagnostic |
 | `font16.c/.h` | 16 px Unicode font (Chinese, pinyin, Latin, punctuation) from GNU Unifont |
 | `unifont16.bin` | The font bitmaps, embedded in the firmware (built by `tools/make_font.py`) |
 | `ui_loading.c/.h` | The small "Loading..." box apps show before a slow full refresh |
+| `ui_sidebar.c/.h` | The title bar on the left edge that apps draw their title into |
 
 ## How drawing works
 
-All drawing goes into a **frame buffer** in RAM (250×122, 1 bit per pixel). Nothing
+All drawing goes into a **frame buffer** in RAM (296×128, 1 bit per pixel). Nothing
 appears until you push the buffer to the panel:
 
 ```c
@@ -21,14 +21,14 @@ epd_draw_text(10, 10, "Hi", 2, EPD_BLACK);
 epd_display();                      // full refresh
 ```
 
-Coordinates are **landscape**: x = 0..249 left to right, y = 0..121 top to bottom.
-The panel is physically portrait (122×250); `epd_draw_pixel()` rotates for you.
+Coordinates are **landscape**: x = 0..295 left to right, y = 0..127 top to bottom.
+The panel is physically portrait (128×296); `epd_draw_pixel()` rotates for you.
 
 ### Full vs partial refresh
 
 | | `epd_display()` (full) | `epd_display_partial()` |
 |---|---|---|
-| Time | ~2 s | ~0.3-0.5 s |
+| Time | ~3 s | ~0.6 s |
 | Looks | Flashes black/white | Only changed pixels change |
 | Ghosting | Clears it | Builds up a little each time |
 | Needs | `epd_init()` first | A previous `epd_display()` and an awake panel |
@@ -45,25 +45,36 @@ The usual pattern, used by every app:
 `epd_display()` writes the image to both of the controller's RAMs, so the next partial has
 an accurate "previous" picture. A partial refresh also updates the "previous" RAM afterwards.
 
-### Sleep
+`epd_display_base()` writes the buffer to both RAMs without refreshing: it tells the
+panel what is already on screen. `components/power` uses it after the panel lost power:
+it redraws the known "off" screen, loads it as the base, then changes one line with a
+partial refresh.
+
+### Sleep and power
 
 `epd_sleep()` puts the controller into deep sleep, and only a pulse on **RST** can wake it.
-The firmware doesn't use it: the panel just idles awake between refreshes (it draws almost
-nothing when not refreshing, and the image stays without power anyway). If you add sleep
-for battery use, make sure RST is wired solidly.
+While the device is on, the panel just idles awake between refreshes (it draws almost
+nothing when not refreshing, and the image stays without power anyway).
+
+One switched 3.3 V rail (GPIO38, high = on) powers the display, the LoRa radio, the
+microSD slot and the RGB LED. `epd_init()` switches it on the first time it runs, and also
+holds the radio's chip select high: the radio shares the display's SPI bus, and would
+otherwise take display traffic as its own. `epd_power_down()`, used before turning the
+device off, puts the panel to sleep, floats every pin leading to the rail (an output left
+high would power the chips through their protection diodes) and lets the rail's pull-down
+switch it off. The next `epd_init()` sets it all up again.
 
 ### BUSY and timeouts
 
-During a refresh the controller signals busy on BUSY (high on the SSD1680, low on the
-JD79661); `epd_wait_busy()` polls it every 10 ms.
-If it stays busy for 10 s it logs `BUSY pin stuck, check wiring` and carries on.
-On this board that points to the display power switch (GPIO7) or a damaged panel cable.
+During a refresh the controller holds BUSY high; `epd_wait_busy()` polls it every 10 ms.
+If it stays busy for 10 s it logs `BUSY pin stuck, check the panel's ribbon cable` and
+carries on. On this board that points to the rail (GPIO38) or the panel's FPC cable.
 
 After every full refresh `epd_display()` also logs how long the panel was busy. Under 100 ms
 means the panel never started (`full refresh: panel didn't respond`): it isn't powered,
 isn't receiving commands, or BUSY isn't connected.
 
-## Drawing functions (`epd_2in13.h`)
+## Drawing functions (`epd.h`)
 
 | Function | Notes |
 |---|---|
@@ -125,68 +136,51 @@ asleep or hasn't had a full refresh yet.
 
 ## Pins
 
-`epd_pins.h` (shared by the driver and the diagnostic), on the CrowPanel 2.13":
+`epd_pins.h` (shared by the driver and the diagnostic), on the Waveshare
+ESP32-S3-LR1121-ePaper-2.9:
 
 | Display | GPIO |
 |---|---|
-| MOSI (DIN) | 11 |
-| CLK | 12 |
-| CS | 14 |
-| DC | 13 |
-| RST | 10 |
-| BUSY | 9 |
-| Power switch | 7 (high = on) |
+| MOSI (DIN) | 45 (shared with the radio) |
+| CLK | 40 (shared with the radio) |
+| CS | 18 |
+| DC | 17 |
+| RST | 9 |
+| BUSY | 8 |
+| Peripheral rail | 38 (high = on) |
+| LoRa radio NSS / RST | 42 / 39 (held high) |
 
-SPI2 at 4 MHz, write-only. The display's 3.3 V supply is switched by GPIO7; `epd_init()`
-turns it on the first time it runs.
+SPI2 at 4 MHz, write-only.
 
-## Two controllers: SSD1680 and JD79661
+## Controller
 
-Elecrow has shipped this board with either of two controller chips. They do the same job
-with different command sets, so the driver has a code path for each and picks one at the
-first `epd_init()`:
-
-| | SSD1680 (earlier boards) | JD79661 (newer boards) |
-|---|---|---|
-| BUSY | **high** while busy, low when idle | **low** while busy, high when idle |
-| Pixel bit | 1 = white | 1 = white |
-| Row order | As stored | Reversed: the driver sends the last row first |
-| Image RAM | Driver writes new (0x24) and previous (0x26) | Driver writes only new (0x13); the chip keeps the previous one itself |
-| Waveform | Built into the chip | Uploaded by the driver before every refresh (`jd79661_lut.h`) |
-| Refresh | 0x22 + 0x20 | 0x17 0xA5 |
-| Partial refresh | Built-in mode (0x22 0xFF) | "DU" waveform (only changed pixels are driven) |
-| Reset | On every `epd_init()` | Only the first time (and after `epd_sleep()`) |
-
-**Detection:** after a hardware reset both chips sit idle, and the idle level of BUSY
-differs (SSD1680 low, JD79661 high). `detect_controller()` reads it once and the result is
-logged: `epd: controller: SSD1680` or `JD79661`.
-
-**The JD79661 sequence** follows Elecrow's v1.2 example, with init values and waveform
-tables copied from it, and the order of operations matters:
-
-1. Once: reset, configure, fill both image buffers white (0x10, 0x13), upload the full
-   ("GC") waveform, refresh.
-2. Every update: write only the new image to 0x13, upload one waveform set (GC for full
-   refreshes, DU for partial ones), refresh with 0x17 0xA5.
-
-Every waveform upload swaps the contents of registers 0x22 and 0x23 (the white→black and
-black→white tables), as Elecrow's code does. The chip apparently alternates which of its
-two buffers counts as "old", and the swap keeps the two in step. So: **exactly one
-upload per refresh, never write 0x10 after the first clear, and don't reset the chip
-between screens.** Breaking any of these gives inverted colours, an all-white screen, or
-partial updates that never erase.
-
-Found on a real board (2026-10-30), and different from what Elecrow's drawing code
-suggests: the data is 1 = white, and rows must go out last to first (otherwise the
-picture is mirrored left to right). If partial updates misbehave, a quick workaround is to
-make `jd_display_partial()` call `jd_display()` (every update becomes a full, flashing
-refresh).
+The panel is Waveshare's 2.9" V2 module with an SSD16xx-family controller (the same
+command set as the SSD1680), 128 sources × 296 gates. The driver uses the chip's built-in
+waveforms: full refresh with 0x22 0xF7, partial with 0x22 0xFF after writing the new image
+to RAM 0x24 while RAM 0x26 holds the previous one. Waveshare's own driver has a third,
+"fast" full refresh (temperature register forced to 100 °C, 0x22 0xC7) that this driver
+doesn't use. The panel can also show 4 grey levels, which this driver doesn't use either.
 
 ## Orientation
 
-Pixels are stored as row = 249 - x, column = y, which is the orientation Elecrow's
-examples use, so text reads correctly with the board as it sits in its case. If yours is
-upside down, turn on *menuconfig → Hardware → Rotate the display 180 degrees*.
+Pixels are stored as row = 295 - x, column = y, which is the orientation Waveshare's
+examples use. `epd_set_rotated(true)` turns the picture upside down for everything drawn
+afterwards; the Settings app changes it and `main.c` applies the saved choice at start-up.
+*menuconfig → Hardware → Rotate the display 180 degrees* is only the default.
+
+## Vertical drawing and the title bar
+
+`epd_vertical_begin(x, y)` turns every drawing call a quarter turn counter-clockwise until
+`epd_vertical_end()`: drawing (0, 0) lands on screen (x, y), drawing x runs up the screen
+and drawing y to the right. Anything (5×7 text, the 16 px font, rectangles) then comes out
+reading bottom to top, as on a book spine.
+
+`ui_sidebar(title, counter)` uses it for the title bar: an 18 px strip on the left edge
+with the title (UTF-8, cut off if too long) from the bottom, a small counter such as
+"3/12" at the top, and a rule. Content starts at `UI_CONTENT_X`; `UI_CONTENT_W` and
+`UI_CONTENT_CX` help with centering. The Story, Cards, Books and Settings screens use it,
+and the main menu draws its status bar with `ui_sidebar_begin()` / `ui_sidebar_rule()`.
+Titles get about 120 px: 7 Chinese characters, or 15 Latin letters.
 
 ## Wiring diagnostic (`epd_diag.c`)
 
@@ -194,18 +188,16 @@ Turn on *menuconfig → Hardware → Run the display wiring diagnostic at every 
 `epd_diagnose()` before `epd_init()`). After a 4 s pause (time to open the serial log), it
 drives the display pins as plain GPIOs and logs, under the tag `epd_diag`:
 
-0. Switches the display's power on (GPIO7).
+0. Switches the peripheral rail on (GPIO38).
 1. **Pin survey:** each pin with the pull-up, then the pull-down. `floating` is normal for
-   the ESP-to-display lines; **BUSY should be held** (low on an SSD1680, high on a
-   JD79661), because a powered panel drives it. BUSY `floating` means the display has no
-   power or BUSY is disconnected.
+   the ESP-to-display lines; **BUSY should be held low**, because a powered panel drives
+   it. BUSY `floating` means the display has no power or its cable is loose.
 2. **Shorts:** each pin driven high and low; any other pin that follows is reported.
    Caution: an *unpowered* panel can also show up here, because driving DIN high leaks
    power into it through its input protection diodes, which can drag other lines along.
-3. **Reset and commands:** pulses RST, reports BUSY's idle level (which also hints at the
-   controller), then bit-bangs SSD1680 "software reset" and "refresh". A working panel is
-   busy ~1-3 s in total (`<-- panel responded`); a JD79661 reacts to the first command,
-   which it reads as "refresh".
-   It also tries DIN/CLK swapped and CS/DC swapped, the common wiring mix-ups.
+3. **Reset and commands:** pulses RST, reports BUSY's idle level, then bit-bangs
+   "software reset" and "refresh". A working panel is busy ~1-3 s in total
+   (`<-- panel responded`). It also tries DIN/CLK swapped and CS/DC swapped (from the days
+   of a hand-wired panel; on this board the wiring is fixed).
 
 Turn the option off again afterwards: it adds ~20 s to every start-up.

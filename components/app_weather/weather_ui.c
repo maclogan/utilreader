@@ -3,7 +3,7 @@
 #include <math.h>                       // cosf()/sinf() for the sun's rays
 #include <stdio.h>                      // snprintf()
 #include <time.h>                       // time(), gmtime_r() for the clock
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 #include "sdkconfig.h"                  // CONFIG_WEATHER_UNITS_* from menuconfig
 
 // Wind unit label, matching the units requested from the API. Kept short to fit.
@@ -13,16 +13,16 @@
 #define WIND_UNIT "mph"
 #endif
 
-// Layout (pixels). The screen is 250 wide x 122 tall.
-//   x 0..74    : "today" panel (30% of the width)
+// Layout (pixels). The screen is 296 wide x 128 tall.
+//   x 0..74    : "today" panel
 //   x 75       : solid divider line
-//   x 76..249  : 3 columns x 2 rows of day cells for the next 6 days
+//   x 76..294  : 3 columns x 2 rows of day cells for the next 6 days
 #define PANEL_W       75                // width of the today panel
 #define PANEL_CX      (PANEL_W / 2)     // horizontal center of the today panel
 #define GRID_X0       76                // left edge of the day grid
 #define GRID_COLS     3                 // day cells per row
-#define CELL_W        58                // 3 * 58 = 174 px = the rest of the width
-#define CELL_H        61                // 2 * 61 = 122 px = full height
+#define CELL_W        ((EPD_WIDTH - GRID_X0) / GRID_COLS)  // 73: the rest of the width
+#define CELL_H        (EPD_HEIGHT / 2)  // 64: two rows fill the height
 
 // Simplified icon categories that the WMO weather codes get grouped into
 typedef enum { ICON_SUN, ICON_PARTLY, ICON_CLOUD, ICON_FOG, ICON_RAIN, ICON_SNOW, ICON_STORM } icon_t;
@@ -304,6 +304,7 @@ static void draw_day_cell(int x0, int y0, const weather_day_t *d, bool highlight
              day_names[day_of_week(d->year, d->month, d->day)], d->month, d->day);
     day_label(x0, y0 + 1, CELL_W - 1, buf, highlighted);
 
+    x0 += (CELL_W - 58) / 2;                                // the rest is laid out for 58 px: center it
     draw_icon(x0 + 14, y0 + 27, icon_for_code(d->weather_code));  // weather picture, left half
 
     // High and low stacked in the right half, with a short bar between them

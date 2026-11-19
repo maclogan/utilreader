@@ -1,19 +1,21 @@
 #include "story_ui.h"
 
 #include <stdio.h>                      // snprintf()
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 #include "font16.h"                     // Chinese / pinyin text
 #include "review.h"                     // review_contains()
+#include "ui_sidebar.h"                 // title bar on the left
 
-// Layout (pixels). The screen is 250 wide x 122 tall.
-#define MARGIN      4                   // left/right edge of text
-#define HEADER_LINE 17                  // rule under the title
-#define TEXT_Y      21                  // top of the first text row
+// Layout (pixels). The screen is 296 wide x 128 tall; the title bar takes the left
+// UI_SIDEBAR_W columns, the content has the full height.
+#define MARGIN      4                   // space between the content and its edges
+#define LEFT        (UI_CONTENT_X + MARGIN)  // left edge of text
+#define TEXT_Y      3                   // top of the first text row
 #define ROW_H       19                  // 16 px characters + room for the new-word underline
-#define TEXT_ROWS   3                   // rows of text that fit above the lookup area
-#define LOOKUP_LINE 86                  // rule above the pinyin/meaning area
-#define PINYIN_Y    88
-#define MEANING_Y   105
+#define TEXT_ROWS   4                   // rows of text that fit above the lookup area
+#define LOOKUP_LINE 85                  // rule above the pinyin/meaning area
+#define PINYIN_Y    89
+#define MEANING_Y   108
 
 // True for Chinese punctuation, which may hang past the right margin rather than start a row
 static bool is_punctuation(uint32_t cp)
@@ -22,12 +24,12 @@ static bool is_punctuation(uint32_t cp)
 }
 
 // Story menu layout
-#define ITEM_Y      21                  // top of the first item
+#define ITEM_Y      6                   // top of the first item
 #define ITEM_H      25                  // item spacing (4 items fit)
 #define ITEM_BOX_H  23                  // highlight bar height
 
 // Saved words layout: each entry is word + pinyin on one row, meaning below
-#define SAVED_Y     20                  // top of the first entry
+#define SAVED_Y     13                  // top of the first entry
 #define SAVED_H     34                  // entry height
 
 // Draws text clipped at the right margin (meanings are short, but don't trust that)
@@ -51,14 +53,10 @@ static int draw_tag(int right, int y, const char *text, uint8_t color)
     return right - w;
 }
 
-// Title on the left (UTF-8), small counter like "3/12" on the right, rule underneath
+// Title bar on the left: title (UTF-8) from the bottom, small counter like "3/12" at the top
 static void draw_header(const char *title, const char *counter)
 {
-    font16_draw_text(MARGIN, 0, title, EPD_BLACK);
-    if (counter) {
-        epd_draw_text(EPD_WIDTH - MARGIN - epd_text_width(counter, 1), 5, counter, 1, EPD_BLACK);
-    }
-    epd_draw_hline(0, HEADER_LINE, EPD_WIDTH, EPD_BLACK);
+    ui_sidebar(title, counter);
 }
 
 // Wakes the panel for a full refresh, or falls back to full if a partial isn't possible
@@ -88,7 +86,7 @@ static void finish(bool full)
 // Returns the number of rows the text needs.
 static int layout(const story_t *s, int first, int count, int cursor, bool draw)
 {
-    int x = MARGIN, row = 0;
+    int x = LEFT, row = 0;
 
     for (int i = first; i < first + count; i++) {
         const story_token_t *t = &s->tokens[i];
@@ -98,7 +96,7 @@ static int layout(const story_t *s, int first, int count, int cursor, bool draw)
         while ((cp = font16_next_char(&p)) != 0) {
             int w = font16_char_width(cp);
             if (x + w > EPD_WIDTH - MARGIN && !(is_punctuation(cp) && x + w <= EPD_WIDTH)) {
-                x = MARGIN;                                 // next row
+                x = LEFT;                                   // next row
                 row++;
             }
             int y = TEXT_Y + row * ROW_H;
@@ -150,7 +148,7 @@ void story_ui_show(const story_t *s, int page, int cursor, bool full)
     layout(s, s->pages[page].first, s->pages[page].count, cursor, true);
 
     // Lookup area: the highlighted word's pinyin and meaning
-    epd_draw_hline(0, LOOKUP_LINE, EPD_WIDTH, EPD_BLACK);
+    epd_draw_hline(UI_CONTENT_X, LOOKUP_LINE, UI_CONTENT_W, EPD_BLACK);
     if (cursor >= 0) {
         const story_token_t *t = &s->tokens[cursor];
         int tag_x = EPD_WIDTH - MARGIN;
@@ -160,8 +158,8 @@ void story_ui_show(const story_t *s, int page, int cursor, bool full)
         if (t->is_new) {
             draw_tag(tag_x, PINYIN_Y + 3, "NEW", EPD_BLACK);
         }
-        font16_draw_text(MARGIN, PINYIN_Y, t->p, EPD_BLACK);
-        draw_clipped(MARGIN, MEANING_Y, t->d, EPD_BLACK);
+        font16_draw_text(LEFT, PINYIN_Y, t->p, EPD_BLACK);
+        draw_clipped(LEFT, MEANING_Y, t->d, EPD_BLACK);
     }
 
     finish(full);
@@ -176,10 +174,10 @@ void story_ui_show_menu(const char *const items[], int count, int selected, bool
         int y = ITEM_Y + i * ITEM_H;
         uint8_t color = EPD_BLACK;
         if (i == selected) {                                // highlight: white text on a black bar
-            epd_draw_rect(0, y, EPD_WIDTH, ITEM_BOX_H, EPD_BLACK, true);
+            epd_draw_rect(UI_CONTENT_X, y, UI_CONTENT_W, ITEM_BOX_H, EPD_BLACK, true);
             color = EPD_WHITE;
         }
-        epd_draw_text(MARGIN + 6, y + (ITEM_BOX_H - 14) / 2, items[i], 2, color);
+        epd_draw_text(LEFT + 6, y + (ITEM_BOX_H - 14) / 2, items[i], 2, color);
     }
 
     finish(full);
@@ -191,13 +189,13 @@ void story_ui_show_saved(const review_entry_t *entries, int count, int top, int 
 
     char counter[24];
     snprintf(counter, sizeof(counter), "%d/%d", count ? cursor + 1 : 0, count);
-    draw_header("生词  Saved words", counter);
+    draw_header("生词  Saved", counter);
 
     if (count == 0) {
         const char *line1 = "No saved words yet";
-        const char *line2 = "SELECT a word in a story to save it";
-        epd_draw_text((EPD_WIDTH - epd_text_width(line1, 1)) / 2, 55, line1, 1, EPD_BLACK);
-        epd_draw_text((EPD_WIDTH - epd_text_width(line2, 1)) / 2, 70, line2, 1, EPD_BLACK);
+        const char *line2 = "Press on a word in a story to save it";
+        epd_draw_text(UI_CONTENT_CX - epd_text_width(line1, 1) / 2, 50, line1, 1, EPD_BLACK);
+        epd_draw_text(UI_CONTENT_CX - epd_text_width(line2, 1) / 2, 66, line2, 1, EPD_BLACK);
     }
 
     for (int i = 0; i < STORY_UI_SAVED_ROWS && top + i < count; i++) {
@@ -205,15 +203,15 @@ void story_ui_show_saved(const review_entry_t *entries, int count, int top, int 
         int y = SAVED_Y + i * SAVED_H;
         uint8_t color = EPD_BLACK;
         if (top + i == cursor) {                            // highlight: white on black
-            epd_draw_rect(0, y - 1, EPD_WIDTH, SAVED_H, EPD_BLACK, true);
+            epd_draw_rect(UI_CONTENT_X, y - 1, UI_CONTENT_W, SAVED_H, EPD_BLACK, true);
             color = EPD_WHITE;
         }
-        int x = font16_draw_text(MARGIN, y, e->w, color);   // 可是  kěshì            REMOVED
+        int x = font16_draw_text(LEFT, y, e->w, color);   // 可是  kěshì            REMOVED
         font16_draw_text(x + 8, y, e->p, color);            // but, however
         if (!e->saved) {
             draw_tag(EPD_WIDTH - MARGIN, y + 3, "REMOVED", color);
         }
-        draw_clipped(MARGIN, y + FONT16_HEIGHT, e->d, color);
+        draw_clipped(LEFT, y + FONT16_HEIGHT, e->d, color);
     }
 
     finish(full);
@@ -221,7 +219,7 @@ void story_ui_show_saved(const review_entry_t *entries, int count, int top, int 
 
 void story_ui_show_message(const char *title, const char *detail)
 {
-    const char *hint = "EXIT to go back";
+    const char *hint = "BACK to go back";
     epd_init();
     epd_clear(EPD_WHITE);
     font16_draw_text((EPD_WIDTH - font16_text_width(title)) / 2, 34, title, EPD_BLACK);

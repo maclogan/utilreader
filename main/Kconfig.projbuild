@@ -95,8 +95,9 @@ menu "Hardware"
         bool "Rotate the display 180 degrees"
         default n
         help
-            The default matches Elecrow's examples for the CrowPanel 2.13". Turn this on
-            if everything appears upside down on your unit.
+            The default matches Waveshare's examples for the ESP32-S3-LR1121-ePaper-2.9.
+            This is only the starting value: the Settings app's "Rotate" row changes it
+            on the device and remembers its choice.
 
     config DISPLAY_DIAGNOSTIC
         bool "Run the display wiring diagnostic at every boot"

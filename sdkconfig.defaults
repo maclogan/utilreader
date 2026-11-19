@@ -1,18 +1,23 @@
-# Elecrow CrowPanel ESP32 E-Paper 2.13": ESP32-S3-WROOM-1-N8R8 (8 MB quad flash, 8 MB octal PSRAM)
+# Waveshare ESP32-S3-LR1121-ePaper-2.9: ESP32-S3-WROOM-1-N16R8 (16 MB quad flash, 8 MB octal PSRAM)
 CONFIG_IDF_TARGET="esp32s3"
 
 # Flash
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# Partition table: 4 MB app + 1 MB storage (see partitions.csv)
+# Partition table: 4 MB app, 1 MB storage, ~11 MB books (see partitions.csv)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# PSRAM (octal on the N8R8 module)
+# PSRAM (octal on the N16R8 module)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+
+# Slow clock (keeps time in deep sleep) from the board's 32.768 kHz crystal on GPIO15/16
+# instead of the internal RC oscillator, which drifts by minutes a day. If the crystal
+# doesn't start, ESP-IDF falls back to the internal oscillator and logs a warning.
+CONFIG_RTC_CLK_SRC_EXT_CRYS=y
 
 # Bigger main task stack (comfortable headroom for drawing + JSON)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

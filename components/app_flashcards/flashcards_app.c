@@ -46,7 +46,7 @@ static void show_current(bool full)
 static void show_done(bool full)
 {
     if (card_count == 0) {
-        flashcards_ui_show_message("No cards yet", "Save words in the story app (SELECT)", full);
+        flashcards_ui_show_message("No cards yet", "Save words in the story app (press)", full);
     } else {
         // When is the next card due?
         int next = -1;

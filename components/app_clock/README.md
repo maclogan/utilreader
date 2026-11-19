@@ -25,7 +25,7 @@ The local time in big digits with the date underneath.
   the remembered time zone.
 - Before internet time has synced it shows dashes.
 
-No controls do anything except EXIT / MENU (back to the menu).
+No controls do anything except BACK / HOME (back to the menu).
 
 ## Changing it
 

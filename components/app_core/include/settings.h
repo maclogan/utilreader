@@ -6,6 +6,9 @@
 
 #include <stdint.h>
 
+// Keys shared between components (each component's own keys stay private to it)
+#define SETTING_ROTATE_180 "rotate180"  // 1 = display upside down (Settings app; main.c applies it at start-up)
+
 // The stored value for `key`, or `fallback` if it was never set. Keys are at most 15 characters.
 int32_t settings_get_i32(const char *key, int32_t fallback);
 

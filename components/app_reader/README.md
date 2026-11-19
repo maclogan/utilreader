@@ -12,7 +12,7 @@ Book files are handled by `components/books`.
 
 ## Using it
 
-| Screen | Wheel up / down | Hold up / down | Press | EXIT |
+| Screen | Left / right | Hold left / right | Press | BACK |
 |---|---|---|---|---|
 | **Library** | Choose a book (most recently opened first) | | Open it | Leave the app |
 | **Reading** | Previous / next page | Back / forward 10 pages | Chapter list | Library |
@@ -48,7 +48,7 @@ so page boundaries always match what's drawn.
    bytes each). The index file existing means "ready".
 
 A 1 MB Chinese novel (about 3,700 pages) takes a few seconds. While it runs the screen
-says "Preparing the book..."; EXIT goes back to the library and the job finishes in the
+says "Preparing the book..."; BACK goes back to the library and the job finishes in the
 background. Only one book is prepared at a time.
 
 **Turning pages:** read 2 KB from the page's start offset, lay it out in drawing mode,

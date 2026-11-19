@@ -4,7 +4,7 @@
  *
  *   Front: the word.            SELECT shows the answer.
  *   Back:  pinyin and meaning.  LEFT = again (seen again this session), RIGHT = got it.
- *   EXIT leaves the app; progress is saved after every answer.
+ *   BACK leaves the app; progress is saved after every answer.
  */
 #pragma once
 

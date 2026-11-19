@@ -8,14 +8,14 @@
  *  |  http://192.168.1.174                |     |            123 456                   |
  *  |                                      |     |                                      |
  *  | Received: 三体                        |     | Type it on the web page              |
- *  | EXIT: stop sharing                   |     | EXIT: cancel                         |
+ *  | BACK: stop sharing                   |     | BACK: cancel                         |
  *  +--------------------------------------+     +--------------------------------------+
  */
 #include "transfer_app.h"
 
 #include <stdio.h>                      // snprintf()
 #include <string.h>
-#include "epd_2in13.h"                  // drawing
+#include "epd.h"                  // drawing
 #include "font16.h"                     // activity text can be Chinese (book titles)
 #include "webui.h"                      // the web server
 #include "wifi.h"                       // wifi_ip_string()
@@ -54,7 +54,7 @@ static void draw(bool full)
         epd_draw_hline(0, 17, EPD_WIDTH, EPD_BLACK);
         centered(34, spaced, 5);
         centered(84, "Type this code on the web page", 1);
-        centered(108, "EXIT: cancel", 1);
+        centered(108, "BACK: cancel", 1);
     } else {
         font16_draw_text(MARGIN, 0, "Transfer", EPD_BLACK);
         const char *state = st.running ? "running" : "stopped";
@@ -88,7 +88,7 @@ static void draw(bool full)
         } else {
             epd_draw_text(MARGIN, 72, "Waiting for a browser", 1, EPD_BLACK);
         }
-        centered(108, "EXIT: stop sharing", 1);
+        centered(108, "BACK: stop sharing", 1);
     }
 
     if (full) {
@@ -110,7 +110,7 @@ static bool transfer_button(button_event_t event)
         webui_status_t st;
         webui_status(&st);
         if (st.code_live) {
-            webui_pairing_cancel();                         // first EXIT just cancels the code
+            webui_pairing_cancel();                         // first BACK just cancels the code
             draw(false);
             return true;
         }
@@ -178,4 +178,5 @@ const app_t transfer_app = {
     .tick = transfer_tick,
     .background = transfer_background,
     .close = transfer_close,
+    .no_resume = true,                  // the web server only runs when opened on purpose
 };

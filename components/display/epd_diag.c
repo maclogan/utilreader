@@ -12,7 +12,7 @@
  *   4. Commands: bit-bang "software reset" and "refresh" (refresh holds BUSY high ~2 s on a
  *      working panel), with the normal wiring, then DIN/CLK swapped, then CS/DC swapped.
  */
-#include "epd_2in13.h"
+#include "epd.h"
 
 #include "driver/gpio.h"
 #include "esp_log.h"

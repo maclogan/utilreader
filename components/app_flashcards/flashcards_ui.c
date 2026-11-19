@@ -1,15 +1,16 @@
 #include "flashcards_ui.h"
 
 #include <stdio.h>                      // snprintf()
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 #include "font16.h"                     // Chinese / pinyin text
+#include "ui_sidebar.h"                 // title bar on the left
 
-// Layout (pixels). The screen is 250 wide x 122 tall.
+// Layout (pixels). The screen is 296 wide x 128 tall; the title bar takes the left
+// UI_SIDEBAR_W columns.
 #define MARGIN      4
-#define HEADER_LINE 17                  // rule under the title
-#define AREA_TOP    18                  // card area between the header and the hint
-#define AREA_BOTTOM 104
-#define HINT_Y      110                 // hint line (5x7 font)
+#define AREA_TOP    0                   // card area above the hint
+#define AREA_BOTTOM 110
+#define HINT_Y      116                 // hint line (5x7 font)
 
 // Wakes the panel for a full refresh, or falls back to full if a partial isn't possible
 static bool begin(bool full)
@@ -33,26 +34,23 @@ static void finish(bool full)
     }
 }
 
+// Title bar on the left, with the number of cards still due at its top end
 static void draw_header(int left)
 {
-    font16_draw_text(MARGIN, 0, "字卡  Flashcards", EPD_BLACK);
-    if (left > 0) {
-        char counter[24];
-        snprintf(counter, sizeof(counter), "%d left", left);
-        epd_draw_text(EPD_WIDTH - MARGIN - epd_text_width(counter, 1), 5, counter, 1, EPD_BLACK);
-    }
-    epd_draw_hline(0, HEADER_LINE, EPD_WIDTH, EPD_BLACK);
+    char counter[24];
+    snprintf(counter, sizeof(counter), "%d left", left);
+    ui_sidebar("字卡  Cards", left > 0 ? counter : NULL);
 }
 
 static void hint(const char *text)
 {
-    epd_draw_text((EPD_WIDTH - epd_text_width(text, 1)) / 2, HINT_Y, text, 1, EPD_BLACK);
+    epd_draw_text(UI_CONTENT_CX - epd_text_width(text, 1) / 2, HINT_Y, text, 1, EPD_BLACK);
 }
 
-// Draws UTF-8 text centered on the screen at `scale` (1-3), top at y. Returns its height.
+// Draws UTF-8 text centered in the content area at `scale` (1-3), top at y. Returns its height.
 static int text_centered(int y, const char *text, int scale)
 {
-    int x = (EPD_WIDTH - font16_text_width(text) * scale) / 2;
+    int x = UI_CONTENT_CX - font16_text_width(text) * scale / 2;
     const char *p = text;
     uint32_t cp;
     while ((cp = font16_next_char(&p)) != 0) {
@@ -61,12 +59,12 @@ static int text_centered(int y, const char *text, int scale)
     return FONT16_HEIGHT * scale;
 }
 
-// Biggest scale (up to max) at which `text` fits across the screen
+// Biggest scale (up to max) at which `text` fits across the content area
 static int fit_scale(const char *text, int max)
 {
     int w = font16_text_width(text);
     for (int s = max; s > 1; s--) {
-        if (w * s <= EPD_WIDTH - 2 * MARGIN) {
+        if (w * s <= UI_CONTENT_W - 2 * MARGIN) {
             return s;
         }
     }
@@ -82,9 +80,9 @@ void flashcards_ui_show_card(const card_t *c, bool back, int left, bool full)
         int scale = fit_scale(c->w, 3);                     // 48 px characters when they fit
         int h = FONT16_HEIGHT * scale;
         text_centered(AREA_TOP + (AREA_BOTTOM - AREA_TOP - h) / 2, c->w, scale);
-        hint("SELECT: show answer");
+        hint("Press: show answer");
     } else {
-        int y = AREA_TOP + 6;
+        int y = AREA_TOP + 12;
         y += text_centered(y, c->w, fit_scale(c->w, 2)) + 6;   // word at 2x
         y += text_centered(y, c->p, 1) + 4;                 // pinyin
         text_centered(y, c->d, 1);                          // meaning
@@ -98,8 +96,8 @@ void flashcards_ui_show_message(const char *title, const char *detail, bool full
 {
     full = begin(full);
     draw_header(0);
-    epd_draw_text((EPD_WIDTH - epd_text_width(title, 2)) / 2, 45, title, 2, EPD_BLACK);
-    epd_draw_text((EPD_WIDTH - epd_text_width(detail, 1)) / 2, 72, detail, 1, EPD_BLACK);
+    epd_draw_text(UI_CONTENT_CX - epd_text_width(title, 2) / 2, 42, title, 2, EPD_BLACK);
+    epd_draw_text(UI_CONTENT_CX - epd_text_width(detail, 1) / 2, 69, detail, 1, EPD_BLACK);
     finish(full);
 }
 

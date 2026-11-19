@@ -1,17 +1,17 @@
 /*
- * Story app screen: as many whole sentences as fit in 3 rows, with the highlighted word
- * looked up underneath.
+ * Story app screen: as many whole sentences as fit in 4 rows, with the highlighted word
+ * looked up underneath. The title and page number stand in the bar on the left
+ * (ui_sidebar.h), reading bottom to top.
  *
- *  +-----------------------------------------+
- *  | 小猫的早上                           3/6 |  <- title, page number
- *  |-----------------------------------------|
- *  | 今天早上，[小猫]在窗户边上看鸟。它很    |  <- running text, 16 px characters, wrapped;
- *  | 想出去玩，可是外面在下雨。              |     cursor word inverted, new words underlined
- *  |                                         |
- *  |-----------------------------------------|
- *  | xiǎomāo                      NEW  SAVED |  <- pinyin, tags
- *  | kitten                                  |  <- meaning
- *  +-----------------------------------------+
+ *  +--+--------------------------------------+
+ *  |3/| 今天早上，[小猫]在窗户边上看鸟。它很 |  <- running text, 16 px characters, wrapped;
+ *  |6 | 想出去玩，可是外面在下雨。           |     cursor word inverted, new words underlined
+ *  |上|                                      |
+ *  |早|                                      |
+ *  |的|--------------------------------------|
+ *  |猫| xiǎomāo                   NEW  SAVED |  <- pinyin, tags
+ *  |小| kitten                               |  <- meaning
+ *  +--+--------------------------------------+
  */
 #pragma once
 
@@ -37,7 +37,7 @@ void story_ui_show_menu(const char *const items[], int count, int selected, bool
 #define STORY_UI_SAVED_ROWS 3
 void story_ui_show_saved(const review_entry_t *entries, int count, int top, int cursor, bool full);
 
-// Full-screen message, e.g. while the story is being written, with an "EXIT to go back"
+// Full-screen message, e.g. while the story is being written, with a "BACK to go back"
 // hint. title is UTF-8 (Chinese OK), detail is plain ASCII.
 void story_ui_show_message(const char *title, const char *detail);
 

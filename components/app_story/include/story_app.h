@@ -11,7 +11,7 @@
  *             SELECT un-saves / re-saves the highlighted word.
  *   WRITING - "writing the story" message; the reader opens by itself when it's done.
  *
- * EXIT goes back to the story menu; from the story menu, back to the main menu.
+ * BACK goes back to the story menu; from the story menu, back to the main menu.
  */
 #pragma once
 

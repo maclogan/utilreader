@@ -6,29 +6,32 @@
  *   - shows the menu of apps and opens the chosen one (and, at power-on, the last one used)
  *   - waits for buttons, scheduled wake-ups and finished downloads, and passes them on
  *
- * Controls anywhere: MENU = home (this menu); everything else goes to the app.
+ * Controls anywhere: holding BACK = home (this menu); everything else goes to the app.
+ * The lock switch silences every control; the Power tile turns the device off (power.h).
  * To add an app, write a component that exports an app_t and list it in `apps` below.
  * See main/README.md.
  */
 #include <stdbool.h>
 #include <stdio.h>                      // snprintf()
 #include <string.h>                     // strlen(), strcmp()
+#include <sys/time.h>                   // struct timeval (SNTP callback)
 #include "app.h"                        // app_t
-#include "battery.h"                    // fuel gauge on the GPIO_D port (optional)
-#include "board_led.h"                  // board_led_off()
+#include "battery.h"                    // onboard fuel gauge
 #include "books.h"                      // books_init()
 #include "buttons.h"                    // buttons_init(), buttons_wait()
 #include "clock_app.h"
-#include "epd_2in13.h"                  // halt() screen
+#include "epd.h"                  // halt() screen
 #include "esp_log.h"
 #include "flashcards_app.h"
 #include "reader_app.h"
+#include "settings_app.h"
 #include "transfer_app.h"
 #include "esp_netif_sntp.h"             // internet time (SNTP)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"              // vTaskDelay(), xTaskGetTickCount()
 #include "local_time.h"                 // local_time_init()
 #include "menu_ui.h"                    // menu_ui_show()
+#include "power.h"                      // power_boot_check(), power_app
 #include "nvs_flash.h"                  // non-volatile storage (settings, Wi-Fi calibration)
 #include "sdkconfig.h"                  // CONFIG_WEATHER_WIFI_SSID
 #include "settings.h"                   // remembering the last app
@@ -49,6 +52,8 @@ static const app_t *const apps[] = {
     &flashcards_app,
     &reader_app,
     &transfer_app,
+    &settings_app,
+    &power_app,
 };
 #define APP_COUNT ((int)(sizeof(apps) / sizeof(apps[0])))
 
@@ -70,11 +75,14 @@ static void halt(const char *title, const char *detail)
 }
 
 // Opens apps[index] and remembers it as the one to open at the next power-on
+// (unless it's one that shouldn't reopen by itself)
 static void open_app(int index)
 {
     selected = index;
-    settings_set_i32("last_app", index);
-    settings_set_i32("on_menu", 0);
+    if (!apps[index]->no_resume) {
+        settings_set_i32("last_app", index);
+        settings_set_i32("on_menu", 0);
+    }
     ESP_LOGI(TAG, "open %s", apps[index]->name);
     ui_show_loading();                                      // instant feedback during the full refresh
     app_set_showing(apps[index]);
@@ -104,26 +112,35 @@ static void run_background(void)
     }
 }
 
+// SNTP set the clock (runs in the SNTP task)
+static void on_internet_time(struct timeval *tv)
+{
+    local_time_internet_synced();
+}
+
 void app_main(void)
 {
     // ---------- start-up ----------
-    board_led_off();                                        // RGB LED keeps its last color otherwise
-#if CONFIG_DISPLAY_DIAGNOSTIC
-    vTaskDelay(pdMS_TO_TICKS(4000));                        // time to open the serial log after a reset
-    epd_diagnose();                                         // display wiring report (tag "epd_diag")
-#endif
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());                 // NVS partition is full/old: wipe it...
         err = nvs_flash_init();                             // ...and try again
     }
     ESP_ERROR_CHECK(err);
+    // Screen orientation before anything is drawn (power_boot_check() redraws the "off"
+    // screen exactly as it was left)
+    epd_set_rotated(settings_get_i32(SETTING_ROTATE_180, epd_rotated()));  // default: menuconfig
+    power_boot_check();                                     // woken from "off": on only if BACK is held
+#if CONFIG_DISPLAY_DIAGNOSTIC
+    vTaskDelay(pdMS_TO_TICKS(4000));                        // time to open the serial log after a reset
+    epd_diagnose();                                         // display wiring report (tag "epd_diag")
+#endif
 
     if (strlen(CONFIG_WEATHER_WIFI_SSID) == 0) {
         halt("Setup needed", "Set Wi-Fi in menuconfig");
     }
 
-    local_time_init();                                      // remembered time zone
+    local_time_init();                                      // remembered time zone; clock chip -> clock
     storage_init();                                         // /store file system
     books_init();                                           // /books (e-books)
     worker_init();                                          // background jobs
@@ -133,17 +150,19 @@ void app_main(void)
         }
     }
     buttons_init();
-    battery_init();                                         // finds the fuel gauge, if one is plugged in
+    battery_init();                                         // wakes the fuel gauge
 
     // Get online. If it fails, the Wi-Fi driver keeps retrying in the background.
     if (wifi_connect() != ESP_OK) {
         ESP_LOGW(TAG, "no Wi-Fi yet, still trying");
     }
 
-    // Set the clock from the internet
+    // Set the clock from the internet, now and every hour; each sync also sets the clock chip
     esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    sntp.sync_cb = on_internet_time;
     esp_netif_sntp_init(&sntp);                             // starts syncing in the background
-    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {  // wait up to 10 s for the first sync
+    if (!local_time_synced() &&                             // the clock chip usually has the time already
+        esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {  // if not, wait up to 10 s
         ESP_LOGW(TAG, "time not synced yet");
     }
 
@@ -151,10 +170,10 @@ void app_main(void)
     TickType_t next_background = xTaskGetTickCount() + BACKGROUND_TICKS;
 
     // Power-on: back where we were, the last app or the menu (a new board starts on the menu).
-    // Transfer is never reopened by itself: its web server only runs when opened on purpose.
+    // Apps marked no_resume (Transfer, Power) are never reopened by themselves.
     int last = settings_get_i32("last_app", 0);
     selected = (last >= 0 && last < APP_COUNT) ? last : 0;
-    if (settings_get_i32("on_menu", 1) || apps[selected] == &transfer_app) {
+    if (settings_get_i32("on_menu", 1) || apps[selected]->no_resume) {
         menu_ui_show(apps, APP_COUNT, selected, true);
     } else {
         open_app(selected);
@@ -170,6 +189,9 @@ void app_main(void)
         TickType_t wait = app_ticks_until(next_background);
         if (app && app->next_wakeup) {
             TickType_t w = app->next_wakeup();
+            wait = w < wait ? w : wait;
+        } else if (app == NULL) {
+            TickType_t w = menu_ui_next_wakeup();           // the menu's clock
             wait = w < wait ? w : wait;
         }
         if (worker_any_pending() && wait > POLL_TICKS) {
@@ -188,6 +210,8 @@ void app_main(void)
             }
             if (app && app->tick) {
                 app->tick();
+            } else if (app == NULL) {
+                menu_ui_tick(apps, APP_COUNT, selected);   // redraws when the minute changed
             }
             continue;
         }
@@ -196,7 +220,15 @@ void app_main(void)
             continue;                                       // a nudge for an app, but the menu is showing
         }
 
-        // HOME (the MENU button) from anywhere: the menu. Jobs carry on in the background.
+        // The lock switch moved: the menu shows a padlock. Apps never see this event.
+        if (event == BUTTON_LOCK_CHANGED) {
+            if (app == NULL) {
+                menu_ui_show(apps, APP_COUNT, selected, false);
+            }
+            continue;
+        }
+
+        // HOME (BACK held) from anywhere: the menu. Jobs carry on in the background.
         if (event == BUTTON_HOME) {
             if (app) {
                 go_home("home");

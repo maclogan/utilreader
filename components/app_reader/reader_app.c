@@ -24,7 +24,7 @@ static const char *TAG = "reader";
 #define MAX_PAGES       40000           // ~3 MB of Chinese text at ~270 bytes a page
 #define MAX_CHAPTERS    512
 #define FULL_EVERY      10              // full refresh every this many page turns, to clear ghosting
-#define JUMP            10              // pages skipped by holding the wheel
+#define JUMP            10              // pages skipped by holding left / right
 
 // Scrolling a too-long title in a list (see reader_ui.h): pause, then MARQUEE_STEP characters
 // every MARQUEE_MS, pause at the end, back to the start; MARQUEE_PASSES times, then stop

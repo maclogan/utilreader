@@ -2,13 +2,14 @@
 
 #include <stdio.h>                      // snprintf()
 #include <string.h>                     // strlen()
-#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "epd.h"                  // drawing primitives + display refresh
 #include "font16.h"                     // titles and text
 #include "reader_layout.h"
+#include "ui_sidebar.h"                 // title bar on the left (lists)
 
 #define MARGIN      4
-#define HEADER_LINE 17
-#define FOOTER_Y    114                 // 5x7 footer line
+#define FOOTER_Y    (EPD_HEIGHT - 9)    // 5x7 footer line
+#define LEFT        (UI_CONTENT_X + MARGIN)  // left edge of list text (right of the title bar)
 
 static bool begin(bool full)
 {
@@ -36,16 +37,18 @@ static void text_centered(int y, const char *text)
     epd_draw_text((EPD_WIDTH - epd_text_width(text, 1)) / 2, y, text, 1, EPD_BLACK);
 }
 
-// Header with a title on the left and "n/total" on the right
+// Centered in the content area right of the title bar
+static void content_centered(int y, const char *text)
+{
+    epd_draw_text(UI_CONTENT_CX - epd_text_width(text, 1) / 2, y, text, 1, EPD_BLACK);
+}
+
+// Title bar on the left: title from the bottom, "n/total" at the top
 static void draw_header(const char *title, int selected, int count)
 {
-    font16_draw_text(MARGIN, 0, title, EPD_BLACK);
-    if (count > 0) {
-        char counter[24];
-        snprintf(counter, sizeof(counter), "%d/%d", selected + 1, count);
-        epd_draw_text(EPD_WIDTH - MARGIN - epd_text_width(counter, 1), 5, counter, 1, EPD_BLACK);
-    }
-    epd_draw_hline(0, HEADER_LINE, EPD_WIDTH, EPD_BLACK);
+    char counter[24];
+    snprintf(counter, sizeof(counter), "%d/%d", selected + 1, count);
+    ui_sidebar(title, count > 0 ? counter : NULL);
 }
 
 // ---------- lists ----------
@@ -54,8 +57,8 @@ static void draw_header(const char *title, int selected, int count)
 // when it's the highlighted row it scrolls instead (`marquee` = characters scrolled off).
 // Rows are 1 or 2 lines tall, so how many fit on a screen varies.
 
-#define LIST_TOP    19                  // top of the first row
-#define LIST_BOTTOM 112                 // rows end above the footer
+#define LIST_TOP    2                   // top of the first row
+#define LIST_BOTTOM (FOOTER_Y - 3)      // rows end above the footer
 #define ROW_H1      23                  // one-line row
 #define ROW_H2      41                  // two-line row
 #define ELLIPSIS    0x2026              // "…"
@@ -110,7 +113,7 @@ static fit_t fit_title(const char *title, int width, int *split)
 
 static int title_width(const char *tag)
 {
-    return EPD_WIDTH - 2 * MARGIN - epd_text_width(tag, 1) - 6;
+    return EPD_WIDTH - LEFT - MARGIN - epd_text_width(tag, 1) - 6;
 }
 
 static int row_height(const void *ctx, list_item_fn item, int i)
@@ -198,26 +201,26 @@ static int draw_list(const void *ctx, list_item_fn item, int count, int selected
         bool sel = i == selected;
         uint8_t color = sel ? EPD_WHITE : EPD_BLACK;
         if (sel) {
-            epd_draw_rect(0, y, EPD_WIDTH, h - 1, EPD_BLACK, true);   // highlight: white on black
+            epd_draw_rect(UI_CONTENT_X, y, UI_CONTENT_W, h - 1, EPD_BLACK, true);   // highlight: white on black
         }
         epd_draw_text(EPD_WIDTH - MARGIN - epd_text_width(tag, 1), y + 8, tag, 1, color);
 
-        int right = MARGIN + width;
+        int right = LEFT + width;
         if (fit == FIT_ONE) {
-            draw_line(MARGIN, y + 3, title, strlen(title), right, false, color);
+            draw_line(LEFT, y + 3, title, strlen(title), right, false, color);
         } else if (fit == FIT_TWO) {
-            draw_line(MARGIN, y + 3, title, split, right, false, color);
+            draw_line(LEFT, y + 3, title, split, right, false, color);
             const char *rest = skip_spaces(title + split);
-            draw_line(MARGIN, y + 3 + 18, rest, strlen(rest), right, false, color);
+            draw_line(LEFT, y + 3 + 18, rest, strlen(rest), right, false, color);
         } else if (sel) {                                   // too long and highlighted: scroll
             steps = marquee_steps(title, width);
             const char *p = title;
             for (int k = 0; k < marquee && *p; k++) {
                 font16_next_char(&p);
             }
-            draw_line(MARGIN, y + 3, p, strlen(p), right, false, color);
+            draw_line(LEFT, y + 3, p, strlen(p), right, false, color);
         } else {                                            // too long: cut with "…"
-            draw_line(MARGIN, y + 3, title, strlen(title), right, true, color);
+            draw_line(LEFT, y + 3, title, strlen(title), right, true, color);
         }
         y += h;
     }
@@ -238,11 +241,11 @@ int reader_ui_library(const book_info_t *list, const int *percents, int count, i
     full = begin(full);
     draw_header("Books", selected, count);
     if (count == 0) {
-        text_centered(50, "No books yet");
+        content_centered(50, "No books yet");
     }
     const void *ctx[2] = {list, percents};
     int steps = draw_list(ctx, library_item, count, selected, marquee);
-    text_centered(FOOTER_Y, "Add books with the Transfer app");
+    content_centered(FOOTER_Y, "Add books with the Transfer app");
     finish(full);
     return steps;
 }
@@ -276,7 +279,7 @@ int reader_ui_chapters(const reader_chapter_t *list, int count, int selected, in
     draw_header("Chapters", selected, count);
     chapters_ctx_t ctx = {list, current};
     int steps = draw_list(&ctx, chapter_item, count, selected, marquee);
-    text_centered(FOOTER_Y, "Press: go to chapter   EXIT: back");
+    content_centered(FOOTER_Y, "Press: go to chapter   BACK: back");
     finish(full);
     return steps;
 }
@@ -287,7 +290,7 @@ void reader_ui_message(const char *title, const char *detail)
     epd_clear(EPD_WHITE);
     font16_draw_text((EPD_WIDTH - font16_text_width(title)) / 2, 40, title, EPD_BLACK);
     text_centered(66, detail);
-    text_centered(100, "EXIT to go back");
+    text_centered(100, "BACK to go back");
     epd_display();
 }
 

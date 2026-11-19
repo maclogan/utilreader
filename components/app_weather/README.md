@@ -12,14 +12,14 @@ details screen per day. It also supplies the **time zone** for every other app.
 ## Screens and buttons
 
 ```
-FORECAST  |Today| Tue | Wed | ... |      wheel up/down  highlight a day (wraps around)
-          | icon| icon| icon|     |      press wheel    open its details
-          |  73 |  60 |  59 |     |      EXIT           leave the app
+FORECAST  |Today| Tue | Wed | ... |      left/right     highlight a day (wraps around)
+          | icon| icon| icon|     |      press          open its details
+          |  73 |  60 |  59 |     |      BACK           leave the app
           |  43 |  44 |  39 |     |
           | o1% | o2% | ... |     |      rain chance, wind speed, wind arrow
 DAY       stats on the left, 24-hour temperature / rain graph on the right
-                                         wheel up/down  previous/next day
-                                         EXIT           back to the forecast
+                                         left/right     previous/next day
+                                         BACK           back to the forecast
 ```
 
 ## When it downloads

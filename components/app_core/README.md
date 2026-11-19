@@ -106,7 +106,7 @@ settings_set_i32("hsk_level", 4);                    // skips the write if uncha
 
 Stored in the NVS partition, namespace `"app"`. Keys are at most 15 characters and shared
 by all apps, so prefix them if they might clash. Keys in use: `last_app`, `on_menu` (main),
-`utc_off` (local_time), `hsk_level` (story), `bk<book ID>`, `bo<book ID>`, `book_seq` (reading positions, last opened; books). Good for small values that change rarely;
+`utc_off` (local_time), `rotate180` (Settings app, applied by main), `hsk_level` (story), `bk<book ID>`, `bo<book ID>`, `book_seq` (reading positions, last opened; books). Good for small values that change rarely;
 use files for anything larger.
 
 ## Storage (`/store`)
@@ -128,8 +128,11 @@ struct tm t;
 if (local_time_now(&t)) { /* t.tm_hour, t.tm_min ... in local time */ }
 ```
 
-- The clock comes from the internet (SNTP, started in `main.c`).
-  `local_time_synced()` is false until the first sync.
+- The clock comes from the internet (SNTP, started in `main.c`, hourly), from the
+  board's clock chip after a reset (`components/clock_chip`), or by hand
+  (`local_time_set_local()`, the Settings app). Internet syncs and manual changes are
+  copied to the clock chip. `local_time_synced()` is false until the clock is set.
+- `local_time_format_hm()` gives "5:05 PM" for status bars (`LOCAL_TIME_24H` for "17:05").
 - The **time zone** comes from the weather forecast: the weather app calls
   `local_time_set_offset()` with each one. It's remembered in flash, so after a power-on
   the clock and story use the last known time zone straight away.

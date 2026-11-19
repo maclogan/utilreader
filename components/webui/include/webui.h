@@ -28,5 +28,5 @@ void webui_stop(void);
 // Current status. Whenever it changes the web server wakes the main loop (BUTTON_WAKE).
 void webui_status(webui_status_t *out);
 
-// Withdraws the pairing code on screen (e.g. EXIT pressed while it shows)
+// Withdraws the pairing code on screen (e.g. BACK pressed while it shows)
 void webui_pairing_cancel(void);

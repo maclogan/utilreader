@@ -16,7 +16,7 @@ add and delete books and see the saved words.
    6-digit code; type it into the page. The browser stays paired until the board restarts.
 3. Upload, delete, browse saved words. The screen shows upload progress (every 10%) and
    the last thing that happened (`Received: 三体`, `Deleted: ...`).
-4. **EXIT** (or MENU) stops the server. If a pairing code is showing, the first EXIT just
+4. **BACK** (or HOME) stops the server. If a pairing code is showing, the first BACK just
    cancels the code.
 
 The board never reopens Transfer by itself after a power-on (it shows the main menu

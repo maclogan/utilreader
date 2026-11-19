@@ -1,9 +1,9 @@
 # E-paper app board
 
-Apps on an [Elecrow CrowPanel ESP32 E-Paper HMI 2.13"](https://elecrow.com/wiki/CrowPanel_ESP32_E-Paper_HMI_2.13-inch_Display.html):
-an ESP32-S3 with a built-in 250×122 black/white e-paper screen, a 3-way thumbwheel, EXIT
-and MENU buttons, and a LiPo battery connector with charger. No wiring needed; an optional
-fuel gauge on the GPIO_D port adds a battery level to the menu.
+Apps on a [Waveshare ESP32-S3-LR1121-ePaper-2.9](https://www.waveshare.com/esp32-s3-lr1121-epaper-2.9.htm)
+([wiki](https://docs.waveshare.com/ESP32-S3-LR1121-ePaper-2.9)): an ESP32-S3 with a built-in
+296×128 black/white e-paper screen, a LiPo charger and fuel gauge. The controls (a 5-way
+switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 
 | App | What it does |
 |---|---|
@@ -13,80 +13,55 @@ fuel gauge on the GPIO_D port adds a battery level to the menu.
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
 | **Books** | E-book reader: chapters, reading position and progress kept per book |
 | **Transfer** | While open, a web page on your Wi-Fi to add/delete books and see saved words |
+| **Settings** | Set the date and time by hand; turn the screen upside down |
+| **Power** | Turns the device off (hold BACK / HOME to turn it on again) |
 
 At power-on the board returns to where it was: the last app, or the main menu if that's
-where you left it (Transfer is never reopened automatically).
+where you left it (Transfer and Power are never reopened automatically).
 
 ## Hardware
 
-- **Module:** ESP32-S3-WROOM-1-N8R8: dual-core 240 MHz, 8 MB flash, 8 MB octal PSRAM,
-  2.4 GHz Wi-Fi (no 5 GHz). Flashed over the USB-C port, which shows up as a COM port.
-- **Display:** 2.13" 250×122 black/white e-paper. Depending on the production batch the
-  controller is an **SSD1680** or a **JD79661**; the driver detects which at start-up.
-- **Controls:** thumbwheel (up / down / press in), EXIT, MENU; plus RESET and BOOT.
-- **Battery:** 3.7 V LiPo on the 2-pin SH1.0 `BAT` connector, charged over USB by a
-  4054-type charger. The ESP32 can't read the battery level or charging state (see below).
+- **Board:** ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB PSRAM, 2.4 GHz Wi-Fi), 2.9"
+  296×128 e-paper, LiPo charger and AXP2602 fuel gauge. Flashed over its USB-C port.
+- **You add:** a 5-way tact switch (left/right/center), a push button (BACK / HOME) and a
+  lock switch on the 14-pin header, and optionally a 3.7 V LiPo. Every control just
+  connects a pin to GND.
 
-## Pinout
-
-Everything is wired on the board; these are the GPIOs the firmware uses (from Elecrow's
-schematic, net names in `code` font):
-
-| Function | GPIO | Net | In the firmware |
-|---|---|---|---|
-| Display SPI clock | 12 | `IO12_SPI_CLK` | `components/display/epd_pins.h` |
-| Display SPI data (MOSI) | 11 | `IO11_SPI_MOSI` | |
-| Display chip select | 14 | `IO14_CS` | |
-| Display data/command | 13 | `IO13_D/C` | |
-| Display reset | 10 | `IO10_RES` | |
-| Display busy | 9 | `IO9_BUSY` | |
-| Display power switch | 7 | `IO7_LCD_3.3_CTL` | High = display powered |
-| Thumbwheel up | 6 | `IO6_UP` | `components/buttons/buttons.c` |
-| Thumbwheel down | 4 | `IO4_DOWN` | |
-| Thumbwheel press | 5 | `IO5_CONF` | |
-| EXIT button | 1 | `IO1_EXIT` | |
-| MENU button | 2 | `IO2_MENU` | |
-| LED | 19 | `IO19_LED` | `components/board_led` (switched off; high = on) |
-| GPIO_D port | 40, 41 | `IO40`, `IO41` | `components/battery` (I2C to the fuel gauge) |
-| BOOT button | 0 | | Hold while resetting for download mode |
-
-All five controls pull their pin to GND when pressed and have pull-up resistors on the board.
-
-**Free for add-ons:** GPIO40 and GPIO41 on the 4-pin **GPIO_D** port (`P1`, small HY2.0
-socket: GND, 3V3, GPIO41, GPIO40; used by the battery fuel gauge), plus the 4-pin UART0
-port (`P2`, larger XH2.54 socket: GND, **5V**, TX, RX). Elsewhere the module also has GPIO15-18, 20, 21 and 45-48 unconnected, but they
-aren't brought out to a header.
-
-### Battery
-
-The `BAT` connector feeds a 4054 linear charger (`U6`, charges from USB at about 330 mA,
-set by `R12`) and a P-MOSFET switch (`U9`) that runs the board from the battery when USB
-is unplugged. Neither the battery voltage nor the charger's status pin reaches the ESP32.
-
-**Battery level add-on:** a **MAX17043 or MAX17048 fuel gauge** board on the
-**GPIO_D** port gives the main menu a battery percentage and charging indicator, with no
-soldering on the board:
-
-| GPIO_D (P1) pin | Signal | Fuel gauge |
+| Control | Header pin | GPIO |
 |---|---|---|
-| 1 | GND | GND |
-| 2 | 3V3 | VCC / VIN |
-| 3 | GPIO41 | SDA or SCL (either way round) |
-| 4 | GPIO40 | SCL or SDA |
+| 5-way left / right / center | GP4 / GP5 / GP3 | 4 / 5 / 3 |
+| BACK / HOME (also turns on) | GP2 | 2 |
+| Lock (closed = locked) | RX | 44 |
 
-The gauge also goes in line with the battery (battery → gauge → CrowPanel `BAT`). Details
-in [components/battery/README.md](components/battery/README.md). Without a gauge the
-firmware simply shows no battery level.
+**[HARDWARE.md](HARDWARE.md)** has the parts list, header pinout, wiring, power and
+charging details, and the full GPIO map.
 
 ## Using it
 
 | Control | Does |
 |---|---|
-| **MENU** | Home: back to the main menu, from anywhere |
-| **EXIT** | Back: up one level (from an app's first screen, to the menu) |
-| Thumbwheel **up / down** | Previous / next (moves the highlight, cursor, card...) |
-| Hold the wheel **up / down** | App-specific, e.g. previous / next page in the story |
-| **Press** the wheel | Select / open / act |
+| **Hold BACK / HOME** | Home: back to the main menu, from anywhere |
+| **Tap BACK / HOME** | Back: up one level (from an app's first screen, to the menu) |
+| 5-way **left / right** | Previous / next (moves the highlight, cursor, card...) |
+| Hold **left / right** | App-specific, e.g. previous / next page in the story |
+| **Press** the 5-way | Select / open / act |
+| **Lock** switch on | All controls ignored (a padlock shows on the menu) |
+
+**Off and on.** Open the **Power** tile to turn off: the screen shows a power symbol and
+"Hold BACK to turn on". To turn on, hold BACK / HOME for about 1.5 s until "Starting..."
+appears. A shorter press does nothing, and with the lock switch on the device stays off.
+"Off" is the chip's deep sleep with the display, radio, SD card and LED switched off (the
+board has no real power switch): Waveshare measures about 36 µW, so a battery lasts years.
+RESET also starts it.
+
+**Screens.** Titles stand in a narrow bar on the left edge, reading bottom to top, so
+the screen keeps its full height for content. On the main menu that bar shows the time,
+a padlock while locked, and the battery.
+
+**Time.** The clock is set from the internet (checked hourly while online) and copied to
+the board's clock chip, so it's right straight after a reset or a long time off, even
+without Wi-Fi. The time zone comes with each weather forecast. Without internet, set the
+date and time in **Settings**.
 
 Downloads run in the background, so the controls keep working while something loads;
 going home mid-download is instant and the download finishes in the background.
@@ -98,7 +73,7 @@ going home mid-download is instant and the download finishes in the background.
    board** and type the 6-digit code from the board's screen.
 3. Choose a `.txt`, `.epub` (2 or 3) or `.html` file. The page converts it to plain text the
    board can show, marks the chapters, shows a preview, and uploads it in pieces.
-4. EXIT on the board stops the web page. Read the book in **Books**.
+4. BACK on the board stops the web page. Read the book in **Books**.
 
 The same page lists and deletes books and shows the saved Chinese words. Details:
 `components/webui/README.md` and `components/app_reader/README.md`.
@@ -118,7 +93,8 @@ regenerates `sdkconfig`, so note your Wi-Fi/API settings first.
 3. Build and flash: `idf.py -p COMx build flash` (the board's COM number: Device Manager →
    Ports, "USB Serial Device"). Watch the log with `idf.py -p COMx monitor` (close the
    monitor before flashing again, it holds the port). If the board won't connect, hold
-   **BOOT**, tap **RESET**, release BOOT, then flash.
+   **BOOT**, tap **RESET**, release BOOT, then flash. While the device is off (deep sleep)
+   the USB port disappears: turn it on or press RESET first.
 
 `sdkconfig` holds your Wi-Fi password and API key in plain text, so don't share it.
 `sdkconfig.defaults` holds the non-secret defaults (target, flash size, PSRAM, partition
@@ -128,24 +104,27 @@ table).
 
 | Partition | Size | Holds |
 |---|---|---|
-| nvs | 24 KB | Settings: last app, time zone, HSK level, Wi-Fi calibration |
+| nvs | 24 KB | Settings: last app, time zone, screen rotation, HSK level, Wi-Fi calibration |
 | phy_init | 4 KB | Radio calibration |
 | factory | 4 MB | The firmware (about 1.8 MB, mostly the 700 KB Chinese font) |
 | storage | 1 MB | SPIFFS files at `/store`: today's story, known words, saved words, flashcard progress |
-| books | 2.9 MB | FAT at `/books`: e-books, their page indexes and chapter lists |
+| books | 10.9 MB | FAT at `/books`: e-books, their page indexes and chapter lists |
 
 ## How the code is organised
 
 ```
+HARDWARE.md               parts, wiring, pinout, power
 main/                     the launcher: start-up, main menu, event loop      (main/README.md)
 components/
   app_core/               what apps are built on: app_t interface, worker,
                           settings, file storage, local time               (README inside)
-  display/                e-paper driver (SSD1680 + JD79661), 16 px Unicode font,
-                          loading box, wiring diagnostic
-  buttons/                thumbwheel + EXIT/MENU -> tap / hold events
-  board_led/              the board's LED (switched off)
-  battery/                MAX17043/48 fuel gauge on GPIO_D (battery % on the main menu)
+  display/                e-paper driver (SSD16xx), 16 px Unicode font, loading box,
+                          left title bar, wiring diagnostic; owns the peripheral rail
+  buttons/                5-way switch + BACK/HOME + lock switch -> tap / hold events
+  battery/                AXP2602 fuel gauge + charge status (battery % on the main menu)
+  clock_chip/             PCF85063A real-time clock: keeps the time across resets
+  i2c_bus/                the board's I2C bus, shared by the gauge and the clock chip
+  power/                  off (deep sleep, the Power tile) and on (hold BACK/HOME)
   books/                  e-book files (shared by the web interface and the reader)
   webui/                  web server + page: pairing, book upload/convert, saved words
   net/                    Wi-Fi connection
@@ -156,6 +135,7 @@ components/
   app_flashcards/         Flashcards (Cards) app
   app_reader/             Books (e-reader) app
   app_transfer/           Transfer app (runs the web interface while open)
+  app_settings/           Settings app (date, time, screen rotation)
 tools/make_font.py        builds the embedded font from GNU Unifont
 ```
 
@@ -197,21 +177,27 @@ depends on, so the build enforces this.
 See [main/README.md](main/README.md#adding-an-app). In short: create
 `components/app_<name>/` exporting an `app_t`, add it to `PRIV_REQUIRES` in
 `main/CMakeLists.txt`, and add it to the `apps[]` list in `main/main.c`. The menu scrolls
-when there are more than three apps.
+when there are more than four apps.
 
 ## Troubleshooting
 
 - **"Could not open COMx, the port is busy"**: close the serial monitor, or unplug/replug.
   If it still won't connect, hold BOOT, tap RESET, release BOOT (download mode).
 - **Screen never changes**: the log says `full refresh: panel didn't respond` (panel not
-  powered or not receiving commands) or `BUSY pin stuck`. Turn on *menuconfig →
-  Hardware → Run the display wiring diagnostic* for a pin-by-pin report (see
-  `components/display/README.md`). Buttons also stop responding while the firmware waits
+  powered or not receiving commands) or `BUSY pin stuck`: check the panel's ribbon cable
+  in its FPC connector. *menuconfig → Hardware → Run the display wiring diagnostic* gives a
+  pin-by-pin report (see `components/display/README.md`). Buttons also stop responding while the firmware waits
   on a stuck display, because each wait times out after 10 s.
-- **Everything is upside down**: turn on *menuconfig → Hardware → Rotate the display
-  180 degrees*.
-- **Partial refreshes look wrong or leave ghosts** on a JD79661 board (the log says
-  `controller: JD79661` at start-up): see "JD79661" in `components/display/README.md`.
+- **Everything is upside down**: *Settings → Rotate*. (*menuconfig → Hardware → Rotate
+  the display 180 degrees* sets the default for a board that has never saved the setting.)
+- **Clock wrong or blank after a reset**: the clock chip lost its time (the battery ran
+  flat or was unplugged, log: `oscillator stopped`). It's set again at the next internet
+  sync, or set it in *Settings*.
+- **Controls do nothing**: check the lock switch (the menu shows a padlock while locked;
+  the log says `controls locked`). The board's KEY button works as BACK / HOME without any
+  wiring.
+- **Won't turn on**: hold BACK / HOME for a full 1.5 s, with the lock switch off. If the
+  battery ran flat, plug in USB and press RESET.
 - **Wi-Fi won't connect**: the ESP32-S3 only does 2.4 GHz; a 5 GHz-only network won't work.
 - **Story says "Set the API key in menuconfig"**: add a key under *Chinese Story*. API use
   is billed separately from Claude subscriptions (pay-as-you-go credit at platform.claude.com).

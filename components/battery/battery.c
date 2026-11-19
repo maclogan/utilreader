@@ -1,131 +1,95 @@
 #include "battery.h"
 
+#include <stdlib.h>                     // abs()
+#include "driver/gpio.h"                // charger status line
 #include "driver/i2c_master.h"          // I2C bus to the fuel gauge
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"              // vTaskDelay()
+#include "i2c_bus.h"                    // the board's I2C bus
 
 static const char *TAG = "battery";
 
-// GPIO_D port (connector P1: GND, 3V3, IO41, IO40). Which one is SDA depends on the
-// cable, so battery_init() tries both.
-#define PIN_A           40
-#define PIN_B           41
-#define GAUGE_ADDR      0x36            // fixed I2C address of the MAX1704x family
+#define PIN_CHARGING    47              // high while the charger is charging (BAT_STAT through Q7)
+#define GAUGE_ADDR      0x62            // AXP2602
 #define I2C_HZ          100000
 #define TIMEOUT_MS      50
 
-// MAX1704x registers (16 bit, big-endian). VCELL and SOC read the same on both chips
-// (the MAX17043's 12-bit VCELL sits in the top bits, so the 78.125 uV scale still holds).
-#define REG_VCELL       0x02            // cell voltage, 78.125 uV per bit
-#define REG_SOC         0x04            // state of charge, 1/256 % per bit
-#define REG_VERSION     0x08            // MAX17048/49: 0x001x; MAX17043/44: lower
-#define REG_CRATE       0x16            // MAX17048/49 only: charge rate, 0.208 %/hour per bit
+// AXP2602 registers (values from Waveshare's driver for this board)
+#define REG_CHIP_ID     0x00            // low 6 bits read 0x1C
+#define REG_MODE        0x02            // bit 0: sleep
+#define REG_VBAT        0x04            // 16 bit big-endian, low 14 bits = millivolts
+#define REG_SOC         0x08            // state of charge, %
+#define REG_ADC_CONFIG  0x11            // bits 4-6 switch the measurements on
+#define REG_IBAT        0x14            // 16 bit big-endian signed, 0.25 mA per bit
 
-#define CHARGING_RATE   5               // tenths of %/h: above this counts as charging
-#define FULL_PERCENT    98              // at or above this, and not draining = full
-#define FULL_MV         4150            // MAX17043: at or above this, and not falling = full
+#define CHIP_ID         0x1C
+#define FULL_PERCENT    95              // at or above this...
+#define IDLE_MA         5               // ...with less current than this either way = full
 
-// MAX17043 has no charge-rate register, so charging is read from the voltage trend over
-// the last HISTORY samples (5 minutes at one sample per 30 s).
-#define HISTORY         10
-#define RISE_MV         25              // this far above the window's lowest reading = charging
-#define FALL_MV         10              // this far below the window's highest = not full any more
-
-static i2c_master_bus_handle_t bus;
-static i2c_master_dev_handle_t gauge;   // NULL = no gauge found
-static bool has_crate = false;          // MAX17048/49 (true) or MAX17043/44 (false)
+static i2c_master_dev_handle_t gauge;   // NULL = gauge not found
 static int percent = -1;
 static battery_state_t state = BATTERY_NONE;
 static int millivolts = 0;
-static int rate_tenths = 0;
+static int milliamps = 0;
 
-static int mv_history[HISTORY];         // MAX17043: recent voltages, oldest overwritten first
-static int soc_history[HISTORY];        // and SOC in 1/256 %, for an estimated rate
-static int history_len = 0;
-static int history_next = 0;
-
-static esp_err_t read_reg(uint8_t reg, uint16_t *out)
+static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t len)
 {
-    uint8_t buf[2];
-    esp_err_t err = i2c_master_transmit_receive(gauge, &reg, 1, buf, 2, TIMEOUT_MS);
+    return i2c_master_transmit_receive(gauge, &reg, 1, buf, len, TIMEOUT_MS);
+}
+
+static esp_err_t write_reg(uint8_t reg, uint8_t value)
+{
+    uint8_t buf[2] = {reg, value};
+    return i2c_master_transmit(gauge, buf, sizeof(buf), TIMEOUT_MS);
+}
+
+// Read-modify-write of one register
+static esp_err_t update_reg(uint8_t reg, uint8_t clear, uint8_t set)
+{
+    uint8_t value;
+    esp_err_t err = read_regs(reg, &value, 1);
     if (err == ESP_OK) {
-        *out = (buf[0] << 8) | buf[1];
+        err = write_reg(reg, (value & ~clear) | set);
     }
     return err;
 }
 
-// Opens the bus with the given SDA/SCL and checks for the gauge. Leaves it open if found.
-static bool try_pins(int sda, int scl)
-{
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = -1,                                     // any free I2C controller
-        .sda_io_num = sda,
-        .scl_io_num = scl,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,               // breakout boards have pull-ups too
-    };
-    if (i2c_new_master_bus(&bus_cfg, &bus) != ESP_OK) {
-        return false;
-    }
-    if (i2c_master_probe(bus, GAUGE_ADDR, TIMEOUT_MS) == ESP_OK) {
-        i2c_device_config_t dev_cfg = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = GAUGE_ADDR,
-            .scl_speed_hz = I2C_HZ,
-        };
-        if (i2c_master_bus_add_device(bus, &dev_cfg, &gauge) == ESP_OK) {
-            ESP_LOGI(TAG, "fuel gauge found (SDA GPIO%d, SCL GPIO%d)", sda, scl);
-            return true;
-        }
-    }
-    i2c_del_master_bus(bus);
-    bus = NULL;
-    return false;
-}
-
 void battery_init(void)
 {
-    if (!try_pins(PIN_A, PIN_B) && !try_pins(PIN_B, PIN_A)) {
-        ESP_LOGI(TAG, "no fuel gauge on the GPIO_D port");
+    gpio_config_t chg = {
+        .pin_bit_mask = 1ULL << PIN_CHARGING,
+        .mode = GPIO_MODE_INPUT,                            // driven by Q7 on the board
+    };
+    gpio_config(&chg);
+
+    i2c_master_bus_handle_t bus = i2c_bus_get();
+    if (bus == NULL) {
         return;
     }
-    uint16_t version = 0;
-    read_reg(REG_VERSION, &version);
-    has_crate = (version & 0xFFF0) == 0x0010;
-    ESP_LOGI(TAG, "%s (version 0x%04x)", has_crate ? "MAX17048/49" : "MAX17043/44", version);
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = GAUGE_ADDR,
+        .scl_speed_hz = I2C_HZ,
+    };
+    if (i2c_master_bus_add_device(bus, &dev_cfg, &gauge) != ESP_OK) {
+        gauge = NULL;
+        return;
+    }
+
+    uint8_t id = 0;
+    if (read_regs(REG_CHIP_ID, &id, 1) != ESP_OK || (id & 0x3F) != CHIP_ID) {
+        ESP_LOGW(TAG, "AXP2602 not found (id 0x%02x)", id);
+        i2c_master_bus_rm_device(gauge);
+        gauge = NULL;
+        return;
+    }
+    update_reg(REG_MODE, 0x01, 0);                          // out of sleep
+    update_reg(REG_ADC_CONFIG, 0, 0x70);                    // measurements on
+    vTaskDelay(pdMS_TO_TICKS(350));                         // first conversion (as Waveshare waits)
 
     battery_sample();
-    ESP_LOGI(TAG, "%d mV, %d%%", millivolts, percent);
-}
-
-// MAX17043: charging state from the voltage trend; also estimates the rate from SOC
-static battery_state_t state_from_history(int mv, int soc)
-{
-    mv_history[history_next] = mv;
-    soc_history[history_next] = soc;
-    int oldest = history_len < HISTORY ? 0 : (history_next + 1) % HISTORY;
-    history_next = (history_next + 1) % HISTORY;
-    if (history_len < HISTORY) {
-        history_len++;
-    }
-
-    int lowest = mv, highest = mv;
-    for (int i = 0; i < history_len; i++) {
-        lowest = mv_history[i] < lowest ? mv_history[i] : lowest;
-        highest = mv_history[i] > highest ? mv_history[i] : highest;
-    }
-
-    // Rate: SOC change across the window, in tenths of % per hour (30 s per sample)
-    int span = history_len - 1;
-    rate_tenths = span > 0 ? (soc - soc_history[oldest]) * 10 * 120 / (256 * span) : 0;
-
-    if (mv >= FULL_MV && percent >= FULL_PERCENT && highest - mv < FALL_MV) {
-        return BATTERY_FULL;                                // at the top and holding
-    }
-    if (mv - lowest >= RISE_MV && highest - mv < FALL_MV) {
-        return BATTERY_CHARGING;                            // rose recently and still at its peak
-    }
-    return BATTERY_DISCHARGING;
+    ESP_LOGI(TAG, "%d mV, %d mA, %d%%", millivolts, milliamps, percent);
 }
 
 bool battery_sample(void)
@@ -136,29 +100,28 @@ bool battery_sample(void)
     int old_percent = percent;
     battery_state_t old_state = state;
 
-    uint16_t vcell, soc;
-    if (read_reg(REG_VCELL, &vcell) != ESP_OK || read_reg(REG_SOC, &soc) != ESP_OK) {
-        percent = -1;                                       // gauge unplugged or not answering
+    uint8_t v[2], soc, i[2];
+    if (read_regs(REG_VBAT, v, 2) != ESP_OK || read_regs(REG_SOC, &soc, 1) != ESP_OK ||
+        read_regs(REG_IBAT, i, 2) != ESP_OK) {
+        percent = -1;                                       // gauge not answering
         state = BATTERY_NONE;
         return old_percent != percent || old_state != state;
     }
+    millivolts = ((v[0] << 8) | v[1]) & 0x3FFF;
+    milliamps = (int16_t)((i[0] << 8) | i[1]) / 4;          // 0.25 mA per bit
 
-    millivolts = (int)(vcell * 78125LL / 1000000);          // 78.125 uV per bit
-    int pct = (soc + 128) >> 8;                             // round 1/256 % to whole %
-    percent = pct > 100 ? 100 : pct;                        // the gauge can report a bit over 100
-
-    uint16_t crate;
-    if (has_crate && read_reg(REG_CRATE, &crate) == ESP_OK) {
-        rate_tenths = (int)((int16_t)crate * 208 / 100);    // 0.208 %/h per bit, in tenths
-        if (rate_tenths > CHARGING_RATE && percent < FULL_PERCENT) {
+    if (millivolts < 2500 || millivolts > 4500 || soc > 100) {
+        percent = -1;                                       // no cell on the connector
+        state = BATTERY_NONE;
+    } else {
+        percent = soc;
+        if (gpio_get_level(PIN_CHARGING)) {
             state = BATTERY_CHARGING;
-        } else if (percent >= FULL_PERCENT && rate_tenths >= -CHARGING_RATE) {
-            state = BATTERY_FULL;
+        } else if (percent >= FULL_PERCENT && abs(milliamps) < IDLE_MA) {
+            state = BATTERY_FULL;                           // on USB, charger finished
         } else {
             state = BATTERY_DISCHARGING;
         }
-    } else {
-        state = state_from_history(millivolts, soc);
     }
     return old_percent != percent || old_state != state;
 }
@@ -178,7 +141,14 @@ int battery_millivolts(void)
     return millivolts;
 }
 
-int battery_rate_tenths(void)
+int battery_milliamps(void)
 {
-    return rate_tenths;
+    return milliamps;
+}
+
+void battery_sleep(void)
+{
+    if (gauge != NULL) {
+        update_reg(REG_MODE, 0, 0x01);
+    }
 }
