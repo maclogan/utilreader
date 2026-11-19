@@ -52,6 +52,16 @@ esp_err_t app_script_install(const char *id, char *err, size_t err_size);
 // Deletes /apps/<id> with its settings and data
 esp_err_t app_script_uninstall(const char *id);
 
+// An app's settings for the portal's form: {"schema": [...] (from app.json), "values":
+// {key: value} (secret values left out), "secrets_set": [keys of secrets that have a value]}.
+// NULL if there's no such app.
+cJSON *app_script_settings_json(const char *id);
+
+// Checks `values` ({key: value}) against the app's settings in app.json and saves them to
+// settings.json (merged with what's there; unknown keys ignored; an empty secret keeps the
+// old one). On failure, err says which setting is wrong.
+esp_err_t app_script_save_settings(const char *id, const cJSON *values, char *err, size_t err_size);
+
 // Installed apps as a JSON array: [{id, name, version, author, description, api}]
 cJSON *app_script_list_json(void);
 

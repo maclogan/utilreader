@@ -1,0 +1,17 @@
+{
+  "id": "weather",
+  "name": "Weather",
+  "version": "2.0.0",
+  "api": 1,
+  "author": "maclogan",
+  "description": "7-day forecast from Open-Meteo (free, no key) with a details screen per day. Also sets the board's time zone.",
+  "background": true,
+  "settings": [
+    {"key": "latitude", "label": "Latitude", "type": "string", "default": "40.7128"},
+    {"key": "longitude", "label": "Longitude", "type": "string", "default": "-74.0060"},
+    {"key": "units", "label": "Units", "type": "choice", "default": "imperial",
+     "options": [{"value": "imperial", "label": "Fahrenheit / mph"}, {"value": "metric", "label": "Celsius / km/h"}]},
+    {"key": "refresh_minutes", "label": "Minutes between full refreshes", "type": "int", "min": 5, "max": 1440, "default": 60},
+    {"key": "partial_seconds", "label": "Seconds between partial refreshes", "type": "int", "min": 5, "max": 3600, "default": 300}
+  ]
+}

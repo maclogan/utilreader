@@ -35,8 +35,14 @@ callbacks and finds its state through `self->ctx`. Native apps ignore `self`.
 ## The app registry
 
 `app_registry_add(app, system)` puts an app on the menu: regular apps in the order added,
-system apps (`true`: Transfer, Settings, Power) always at the end. `app_registry_list()`
-returns them in menu order; `app_registry_find(id)` finds one. `main.c` adds the native
+system apps (`true`: Transfer, Settings, Power) always at the end. The user can reorder
+the regular apps and hide apps from the web portal; the choice is kept in flash
+(`menu_order`, `menu_hidden`) and applied by `app_registry_reload_prefs()`. Transfer and
+Power can't be hidden. `app_registry_list()` returns the menu (visible apps, in order),
+`app_registry_all()` every app (for `init()` and `background()`: hidden apps keep
+running), `app_registry_find(id)` an app's menu position. `app_registry_menu_json()` and
+`app_registry_save_prefs()` are for the portal and safe from its task (a mutex guards the
+lists). `main.c` adds the native
 apps; the script host adds and removes script apps (on start-up, and after an install
 through the portal). Main task only.
 
@@ -85,23 +91,27 @@ leaving    HOME, or button() returning false  ->  close() (if set), then the men
 The main task must never block on the network, or the buttons stop responding. Instead:
 
 ```c
-static weather_t download;                  // owned by the job while it runs
+static story_t download;                    // owned by the job while it runs
 
 // 1. Runs in the worker task. Only the slow part; touch nothing the main task uses.
 static void *download_job(void *arg)
 {
-    return weather_fetch(&download) == ESP_OK ? &download : NULL;
+    return fetch_story(&download) == ESP_OK ? &download : NULL;
 }
 
 // 2. Runs later in the main task (worker_dispatch()). Apply the result and redraw.
 static void download_done(void *result, void *arg)
 {
-    if (result && app_is_showing(&weather_app)) { /* copy, redraw */ }
+    if (result && app_is_showing(&story_app)) { /* copy, redraw */ }
 }
 
 // 3. Start it from any callback. Returns false if this job is already pending.
 worker_submit(download_job, download_done, NULL);
 ```
+
+`worker_submit_always()` skips the "already pending" check, for one job function that
+serves many requests (the Lua apps' `net` module). At most 4 jobs are queued at once,
+shared by everyone; `worker_free_slots()` says how many more fit.
 
 - Jobs run **one at a time** in submission order, on a 12 KB stack (enough for HTTPS).
   A long job (writing a story, ~1 min) delays the jobs queued behind it.
@@ -122,6 +132,7 @@ settings_set_i32("hsk_level", 4);                    // skips the write if uncha
 
 Stored in the NVS partition, namespace `"app"`. Keys are at most 15 characters and shared
 by all apps, so prefix them if they might clash. Keys in use: `last_app_id` (string), `on_menu` (main), `apps_seeded` (app_script),
+`menu_order`, `menu_hidden` (strings, app registry),
 `utc_off` (local_time), `rotate180` (Settings app, applied by main), `hsk_level` (story), `bk<book ID>`, `bo<book ID>`, `book_seq` (reading positions, last opened; books). Good for small values that change rarely;
 use files for anything larger.
 
@@ -149,7 +160,7 @@ if (local_time_now(&t)) { /* t.tm_hour, t.tm_min ... in local time */ }
   (`local_time_set_local()`, the Settings app). Internet syncs and manual changes are
   copied to the clock chip. `local_time_synced()` is false until the clock is set.
 - `local_time_format_hm()` gives "5:05 PM" for status bars (`LOCAL_TIME_24H` for "17:05").
-- The **time zone** comes from the weather forecast: the weather app calls
+- The **time zone** comes from the weather forecast: the Weather app (Lua, `time.set_zone()`) calls
   `local_time_set_offset()` with each one. It's remembered in flash, so after a power-on
   the clock and story use the last known time zone straight away.
   `local_time_offset_known()` is false only before the very first forecast.

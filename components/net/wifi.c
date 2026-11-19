@@ -8,7 +8,7 @@
 #include "esp_wifi.h"                   // the Wi-Fi driver
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"      // lets app_main wait until a handler signals "done"
-#include "sdkconfig.h"                  // CONFIG_WEATHER_WIFI_* from menuconfig
+#include "sdkconfig.h"                  // CONFIG_WEATHER_WIFI_* from menuconfig (the "Wi-Fi" menu)
 
 static const char *TAG = "wifi";
 

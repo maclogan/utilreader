@@ -1,6 +1,8 @@
 #include "settings.h"
 
+#include <stdbool.h>
 #include <stdio.h>                      // snprintf()
+#include <stdlib.h>                     // malloc()
 #include <string.h>                     // strcmp()
 #include "nvs.h"                        // nvs_open(), nvs_get_i32(), nvs_set_i32()
 
@@ -49,16 +51,21 @@ void settings_get_str(const char *key, char *out, size_t size, const char *fallb
 
 void settings_set_str(const char *key, const char *value)
 {
-    char old[64];
-    settings_get_str(key, old, sizeof(old), "\x01");      // a value nothing stores
-    if (strcmp(old, value) == 0) {
-        return;                                             // flash wears out: only write changes
-    }
     nvs_handle_t h;
     if (nvs_open(NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
-    nvs_set_str(h, key, value);
-    nvs_commit(h);
+    // Flash wears out: only write changes. Compares the whole stored string.
+    size_t len = 0;
+    bool same = false;
+    if (nvs_get_str(h, key, NULL, &len) == ESP_OK && len == strlen(value) + 1) {
+        char *old = malloc(len);
+        same = old && nvs_get_str(h, key, old, &len) == ESP_OK && strcmp(old, value) == 0;
+        free(old);
+    }
+    if (!same) {
+        nvs_set_str(h, key, value);
+        nvs_commit(h);
+    }
     nvs_close(h);
 }

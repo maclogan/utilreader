@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>                     // strtoul(), free()
 #include <string.h>
+#include "app_registry.h"               // menu order and hidden apps
 #include "app_script.h"                 // installing script apps
 #include "books.h"                      // book files
 #include "buttons.h"                    // buttons_post(BUTTON_WAKE): tell the main loop to redraw
@@ -198,6 +199,7 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddStringToObject(j, "ip", ip);
     cJSON_AddNumberToObject(j, "total", (double)total);
     cJSON_AddNumberToObject(j, "free", (double)free_bytes);
+    cJSON_AddNumberToObject(j, "app_api", APP_SCRIPT_API_VERSION);   // the catalog checks apps against it
     return send_json(req, j, NULL);
 }
 
@@ -457,6 +459,123 @@ static esp_err_t apps_log_get(httpd_req_t *req)
     return e;
 }
 
+// Reads a small JSON request body. Returns the parsed value, or NULL after sending an error.
+static cJSON *recv_json(httpd_req_t *req)
+{
+    char *buf;
+    int len;
+    if (req->content_len > 8192) {
+        send_error(req, "400 Bad Request", "body too big");
+        return NULL;
+    }
+    if (recv_body(req, &buf, &len) != ESP_OK) {
+        return NULL;
+    }
+    cJSON *j = cJSON_ParseWithLength(buf, len);
+    free(buf);
+    if (j == NULL) {
+        send_error(req, "400 Bad Request", "body is not valid JSON");
+    }
+    return j;
+}
+
+// GET /api/apps/settings?id=clock: the app's settings and current values (no secrets)
+static esp_err_t apps_settings_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32];
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    cJSON *j = app_script_settings_json(id);
+    return j ? send_json(req, j, NULL) : send_error(req, "404 Not Found", "no such app");
+}
+
+// POST /api/apps/settings?id=clock, body {"key": value, ...}: save settings; the app reloads
+static esp_err_t apps_settings_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32], err[96];
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    cJSON *values = recv_json(req);
+    if (values == NULL) {
+        return ESP_OK;                                      // error already sent
+    }
+    esp_err_t e = app_script_save_settings(id, values, err, sizeof(err));
+    cJSON_Delete(values);
+    if (e != ESP_OK) {
+        return send_error(req, e == ESP_ERR_NOT_FOUND ? "404 Not Found" : "400 Bad Request", err);
+    }
+    buttons_post(BUTTON_APPS_CHANGED);                      // apps reload with the new values
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "saved", true);
+    return send_json(req, j, NULL);
+}
+
+// GET /api/menu: every app in menu order, with hidden flags
+static esp_err_t menu_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    return send_json(req, app_registry_menu_json(), NULL);
+}
+
+// Joins an array of id strings into "a,b,c" (out[size]); false if it isn't one
+static bool join_ids(const cJSON *arr, char *out, size_t size)
+{
+    out[0] = '\0';
+    if (arr == NULL) {
+        return true;
+    }
+    if (!cJSON_IsArray(arr)) {
+        return false;
+    }
+    size_t at = 0;
+    const cJSON *v;
+    cJSON_ArrayForEach(v, arr) {
+        if (!cJSON_IsString(v) || strlen(v->valuestring) > 24 || strchr(v->valuestring, ',')) {
+            return false;
+        }
+        int n = snprintf(out + at, size - at, "%s%s", at ? "," : "", v->valuestring);
+        if (n < 0 || (size_t)n >= size - at) {
+            return false;
+        }
+        at += n;
+    }
+    return true;
+}
+
+// POST /api/menu, body {"order": [ids], "hidden": [ids]}: the menu's order and hidden apps
+static esp_err_t menu_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    cJSON *j = recv_json(req);
+    if (j == NULL) {
+        return ESP_OK;
+    }
+    char order[APP_REGISTRY_MAX * 26], hidden[APP_REGISTRY_MAX * 26];
+    bool ok = join_ids(cJSON_GetObjectItem(j, "order"), order, sizeof(order)) &&
+              join_ids(cJSON_GetObjectItem(j, "hidden"), hidden, sizeof(hidden));
+    cJSON_Delete(j);
+    if (!ok) {
+        return send_error(req, "400 Bad Request", "order and hidden must be arrays of app ids");
+    }
+    app_registry_save_prefs(order, hidden);
+    buttons_post(BUTTON_APPS_CHANGED);                      // the main loop rebuilds the menu
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "saved", true);
+    return send_json(req, r, NULL);
+}
+
 // POST /api/pair: show a code on the board's screen (the same one again if still valid)
 static esp_err_t pair_post(httpd_req_t *req)
 {
@@ -533,7 +652,7 @@ esp_err_t webui_start(void)
     upload_percent = -1;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 16;
+    cfg.max_uri_handlers = 20;
     cfg.lru_purge_enable = true;                            // drop idle connections when busy
     cfg.recv_wait_timeout = 15;                             // seconds per upload read
 
@@ -555,6 +674,10 @@ esp_err_t webui_start(void)
         {.uri = "/api/apps/upload",  .method = HTTP_POST, .handler = apps_upload_post},
         {.uri = "/api/apps/install", .method = HTTP_POST, .handler = apps_install_post},
         {.uri = "/api/apps/log",     .method = HTTP_GET,  .handler = apps_log_get},
+        {.uri = "/api/apps/settings", .method = HTTP_GET,  .handler = apps_settings_get},
+        {.uri = "/api/apps/settings", .method = HTTP_POST, .handler = apps_settings_post},
+        {.uri = "/api/menu",    .method = HTTP_GET,    .handler = menu_get},
+        {.uri = "/api/menu",    .method = HTTP_POST,   .handler = menu_post},
         {.uri = "/api/pair",    .method = HTTP_POST,   .handler = pair_post},
         {.uri = "/api/pair/verify", .method = HTTP_POST, .handler = pair_verify_post},
     };

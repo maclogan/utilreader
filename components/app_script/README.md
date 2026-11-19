@@ -8,6 +8,8 @@ portal, without rebuilding the firmware. **App authors: see [docs/api.md](../../
 | `include/app_script.h` | For main.c (start, rescan) and the web portal (stage, install, remove, list, log) |
 | `script_host.c` | Finds installed apps, gives each an `app_t`, runs its Lua safely, the error screen, installing, bundled apps, logs |
 | `script_api.c` | The API apps program against: `screen`, `ui`, `app`, `time`, `battery`, `storage`, `settings`, `print`/`log` |
+| `script_net.c` | `net.get` / `net.post`: requests on the worker task, answers delivered to Lua callbacks |
+| `script_json.c` | `json.decode` / `json.encode`, building Lua values directly (memory counts toward the app's limit) |
 | `script_internal.h` | `script_t` (one per installed app), shared by the two |
 
 ## Where apps live
@@ -18,7 +20,7 @@ A 2 MB FAT partition (`apps` in `partitions.csv`) mounted at `/apps`:
 /apps/<id>/app.json        manifest
 /apps/<id>/main.lua        program (+ other .lua modules)
 /apps/<id>/icon.bin        32x32 1-bit icon (the portal converts icon.png)
-/apps/<id>/settings.json   setting values (portal, later)
+/apps/<id>/settings.json   setting values (saved by the portal's settings form)
 /apps/<id>/data/           the app's files (storage module)
 /apps/.staging/<id>/       a package being uploaded
 ```
@@ -70,10 +72,34 @@ Apps in the repository's `apps/` folder can be built into the firmware (`CMakeLi
 embeds `app.json`, `main.lua`, `icon.bin`; `bundled[]` in `script_host.c` lists them).
 On start-up each is installed once (bit i of the `apps_seeded` setting remembers it, so an
 uninstalled one stays gone), and updated when the firmware's copy has a higher `version`
-than the installed one. Today: **Clock**.
+than the installed one. Today: **Weather** and **Clock**.
 
 To bundle another: add its folder name to the `foreach` in `CMakeLists.txt` and an entry
-to `bundled[]`, at the end (the bit position is its index).
+to `bundled[]`, at the end (the bit position is its index). CMake copies each file to a
+uniquely named one in the build folder before embedding it (`clock_app.json`): embedding
+names its output after the file's base name, so two apps' `app.json` would collide.
+
+## Network requests
+
+`net.get()` / `net.post()` copy the URL, headers and body into a request in PSRAM, keep the
+Lua callback in the registry (`luaL_ref`), and queue the request with
+`worker_submit_always()`. The worker runs it with `esp_http_client` and the certificate
+bundle, reading the answer into a PSRAM buffer (up to 256 KB). Back in the main task,
+`script_live(id, generation)` finds the app only if it's the same loaded instance: every
+load gets a new generation number, so an answer for an app that was closed, failed or
+reinstalled in the meantime is dropped instead of reaching a Lua state that no longer
+exists. Otherwise `script_deliver()` calls the callback through the same protected path as
+every other callback. Each app may have 2 requests in flight, and one worker slot is left
+for the native apps.
+
+## Settings
+
+`app_script_settings_json()` gives the portal an app's settings schema (from `app.json`)
+and current values, leaving out secret values (it only says which secrets are set).
+`app_script_save_settings()` checks each value against its type, range or options, keeps
+an existing secret when the form leaves it empty, and merges the result into
+`settings.json`. The portal then posts `BUTTON_APPS_CHANGED`, and the reload picks the new
+values up (`settings.get()` reads `settings.json`, loaded with the app).
 
 ## Logs
 

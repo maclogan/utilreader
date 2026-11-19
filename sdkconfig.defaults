@@ -25,6 +25,3 @@ CONFIG_FATFS_LFN_HEAP=y
 # Bigger main task stack (comfortable headroom for drawing + JSON)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Weather display timing
-CONFIG_WEATHER_PARTIAL_SECONDS=300
-CONFIG_WEATHER_REFRESH_MINUTES=60

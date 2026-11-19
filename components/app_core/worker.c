@@ -49,6 +49,15 @@ bool worker_pending(worker_job_t job)
     return false;
 }
 
+int worker_free_slots(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        n += pending[i] == NULL;
+    }
+    return n;
+}
+
 bool worker_any_pending(void)
 {
     for (int i = 0; i < MAX_JOBS; i++) {
@@ -64,6 +73,11 @@ bool worker_submit(worker_job_t job, worker_done_t done, void *arg)
     if (worker_pending(job)) {
         return false;                                       // already on its way
     }
+    return worker_submit_always(job, done, arg);
+}
+
+bool worker_submit_always(worker_job_t job, worker_done_t done, void *arg)
+{
     for (int i = 0; i < MAX_JOBS; i++) {
         if (pending[i] == NULL) {
             pending[i] = job;

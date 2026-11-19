@@ -23,6 +23,14 @@ void worker_init(void);
 // (so calling it again while a download is in progress is harmless).
 bool worker_submit(worker_job_t job, worker_done_t done, void *arg);
 
+// Like worker_submit(), but queues the job even if the same function is already queued
+// (e.g. one HTTP job function serving many requests). Returns false only when the queue
+// is full (MAX_JOBS jobs at once, shared by everyone).
+bool worker_submit_always(worker_job_t job, worker_done_t done, void *arg);
+
+// How many more jobs fit right now
+int worker_free_slots(void);
+
 // True while `job` is queued or running (its done() hasn't been called yet)
 bool worker_pending(worker_job_t job);
 

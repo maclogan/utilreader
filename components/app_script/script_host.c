@@ -9,6 +9,7 @@
 #include <sys/stat.h>                   // stat(), mkdir()
 #include <unistd.h>                     // unlink(), rmdir()
 #include "app_registry.h"               // adding the apps to the menu
+#include "buttons.h"                    // buttons_post()
 #include "epd.h"                        // icons, the error screen
 #include "esp_heap_caps.h"              // Lua heaps in PSRAM
 #include "esp_log.h"
@@ -37,6 +38,7 @@ static const char *TAG = "app_script";
 static script_t *scripts[APP_REGISTRY_MAX];
 static int script_count = 0;
 static bool mounted = false;
+static uint32_t next_generation = 1;    // unique across every load, so a stale answer never matches
 
 // ---------- files ----------
 
@@ -263,6 +265,8 @@ static void unload(script_t *s)
         lua_close(s->L);
         s->L = NULL;
     }
+    s->generation = 0;                                      // answers for the old state are now stale
+    s->net_pending = 0;
     cJSON_Delete(s->settings_values);
     s->settings_values = NULL;
     s->mem_used = 0;
@@ -303,6 +307,7 @@ static bool load(script_t *s)
     }
     *(script_t **)lua_getextraspace(L) = s;
     s->L = L;
+    s->generation = next_generation++;
 
     // The standard libraries apps may use (no io, os or debug: files go through `storage`)
     static const luaL_Reg libs[] = {
@@ -331,6 +336,8 @@ static bool load(script_t *s)
     snprintf(path, sizeof(path), "%s/settings.json", s->dir);
     s->settings_values = read_json(path);
     script_api_open(L);
+    script_json_open(L);
+    script_net_open(L);
     lua_sethook(L, hook, LUA_MASKCOUNT, HOOK_EVERY);
 
     snprintf(path, sizeof(path), "%s/main.lua", s->dir);
@@ -349,38 +356,42 @@ static bool load(script_t *s)
     return true;
 }
 
+// Calls the function below the top `nargs` values, under the error handler and the
+// instruction limit. If it returns a boolean, *result gets it. On an error, records it,
+// unloads the app and returns false.
+static bool pcall_top(script_t *s, int nargs, bool *result)
+{
+    lua_State *L = s->L;
+    int fn = lua_gettop(L) - nargs;
+    lua_pushcfunction(L, on_error);
+    lua_insert(L, fn);                                      // handler just below the function
+    s->hook_ticks = 0;
+    if (lua_pcall(L, nargs, 1, fn) != LUA_OK) {
+        fail(s, lua_tostring(L, -1));                       // unloads: no settop on a closed state
+        return false;
+    }
+    if (result && lua_isboolean(L, -1)) {
+        *result = lua_toboolean(L, -1);
+    }
+    lua_settop(L, fn - 1);
+    return true;
+}
+
 // Calls the app's global function `fn` with an optional string argument. Missing functions
-// are fine (returns true, *result untouched). If it returns false, *result = false.
-// On an error, records it, unloads the app and returns false.
+// are fine (returns true, *result untouched).
 static bool call(script_t *s, const char *fn, const char *arg, bool *result)
 {
     if (s->L == NULL) {
         return false;
     }
-    lua_State *L = s->L;
-    int base = lua_gettop(L);
-    lua_pushcfunction(L, on_error);
-    if (lua_getglobal(L, fn) != LUA_TFUNCTION) {
-        lua_settop(L, base);
+    if (lua_getglobal(s->L, fn) != LUA_TFUNCTION) {
+        lua_pop(s->L, 1);
         return true;
     }
-    int nargs = 0;
     if (arg) {
-        lua_pushstring(L, arg);
-        nargs = 1;
+        lua_pushstring(s->L, arg);
     }
-    s->hook_ticks = 0;
-    if (lua_pcall(L, nargs, 1, base + 1) != LUA_OK) {
-        fail(s, lua_tostring(L, -1));                       // unloads: no settop on a closed state
-        return false;
-    }
-    if (result && lua_isboolean(L, -1) && !lua_toboolean(L, -1)) {
-        *result = false;
-    } else if (result && lua_isboolean(L, -1)) {
-        *result = true;
-    }
-    lua_settop(L, base);
-    return true;
+    return pcall_top(s, arg ? 1 : 0, result);
 }
 
 // ---------- error screen ----------
@@ -411,6 +422,26 @@ static void show_error(script_t *s)
     }
     epd_draw_text(x, EPD_HEIGHT - 11, "Any button: back to the menu", 1, EPD_BLACK);
     epd_display();
+}
+
+script_t *script_live(const char *id, uint32_t generation)
+{
+    for (int i = 0; i < script_count; i++) {
+        if (scripts[i]->L && scripts[i]->generation == generation && strcmp(scripts[i]->id, id) == 0) {
+            return scripts[i];
+        }
+    }
+    return NULL;
+}
+
+void script_deliver(script_t *s, int nargs)
+{
+    if (!pcall_top(s, nargs, NULL) && app_is_showing(&s->app) && !s->error_on_screen) {
+        show_error(s);
+    }
+    if (s->close_requested && app_is_showing(&s->app)) {
+        buttons_post(BUTTON_WAKE);                          // app.close() from a callback: leave
+    }
 }
 
 // ---------- the app_t callbacks ----------
@@ -658,6 +689,12 @@ extern const uint8_t clock_main_lua[] asm("_binary_clock_main_lua_start");
 extern const uint8_t clock_main_lua_end[] asm("_binary_clock_main_lua_end");
 extern const uint8_t clock_icon_bin[] asm("_binary_clock_icon_bin_start");
 extern const uint8_t clock_icon_bin_end[] asm("_binary_clock_icon_bin_end");
+extern const uint8_t weather_app_json[] asm("_binary_weather_app_json_start");
+extern const uint8_t weather_app_json_end[] asm("_binary_weather_app_json_end");
+extern const uint8_t weather_main_lua[] asm("_binary_weather_main_lua_start");
+extern const uint8_t weather_main_lua_end[] asm("_binary_weather_main_lua_end");
+extern const uint8_t weather_icon_bin[] asm("_binary_weather_icon_bin_start");
+extern const uint8_t weather_icon_bin_end[] asm("_binary_weather_icon_bin_end");
 
 typedef struct {
     const char *name;
@@ -673,6 +710,9 @@ static const bundled_app_t bundled[] = {
     {"clock", {{"app.json", clock_app_json, clock_app_json_end},
                {"main.lua", clock_main_lua, clock_main_lua_end},
                {"icon.bin", clock_icon_bin, clock_icon_bin_end}}},
+    {"weather", {{"app.json", weather_app_json, weather_app_json_end},
+                 {"main.lua", weather_main_lua, weather_main_lua_end},
+                 {"icon.bin", weather_icon_bin, weather_icon_bin_end}}},
 };
 #define SEEDED_KEY "apps_seeded"         // bit i set = bundled[i] was installed once
 
@@ -856,6 +896,144 @@ esp_err_t app_script_uninstall(const char *id)
     delete_files(dir, NULL);
     ESP_LOGI(TAG, "removed %s", id);
     return rmdir(dir) == 0 ? ESP_OK : ESP_FAIL;
+}
+
+// ---------- settings (web portal task) ----------
+
+static cJSON *manifest_settings(const char *id)
+{
+    char path[64];
+    snprintf(path, sizeof(path), BASE "/%.24s/app.json", id);
+    cJSON *m = read_json(path);
+    cJSON *schema = cJSON_DetachItemFromObject(m, "settings");
+    cJSON_Delete(m);
+    return cJSON_IsArray(schema) ? schema : (cJSON_Delete(schema), cJSON_CreateArray());
+}
+
+static const char *setting_type(const cJSON *item)
+{
+    const cJSON *t = cJSON_GetObjectItem(item, "type");
+    return cJSON_IsString(t) ? t->valuestring : "string";
+}
+
+cJSON *app_script_settings_json(const char *id)
+{
+    char path[64];
+    snprintf(path, sizeof(path), BASE "/%.24s", id);
+    if (!mounted || !app_script_valid_id(id) || !is_dir(path)) {
+        return NULL;
+    }
+    cJSON *schema = manifest_settings(id);
+    snprintf(path, sizeof(path), BASE "/%.24s/settings.json", id);
+    cJSON *saved = read_json(path);
+    cJSON *values = cJSON_CreateObject(), *secrets = cJSON_CreateArray();
+    const cJSON *item;
+    cJSON_ArrayForEach(item, schema) {
+        const cJSON *key = cJSON_GetObjectItem(item, "key");
+        const cJSON *v = cJSON_IsString(key) ? cJSON_GetObjectItem(saved, key->valuestring) : NULL;
+        if (v == NULL) {
+            continue;
+        }
+        if (strcmp(setting_type(item), "secret") == 0) {
+            if (cJSON_IsString(v) && v->valuestring[0]) {
+                cJSON_AddItemToArray(secrets, cJSON_CreateString(key->valuestring));   // set, but never sent back
+            }
+        } else {
+            cJSON_AddItemToObject(values, key->valuestring, cJSON_Duplicate(v, true));
+        }
+    }
+    cJSON_Delete(saved);
+    cJSON *out = cJSON_CreateObject();
+    cJSON_AddItemToObject(out, "schema", schema);
+    cJSON_AddItemToObject(out, "values", values);
+    cJSON_AddItemToObject(out, "secrets_set", secrets);
+    return out;
+}
+
+// True if `v` is one of a choice setting's options (strings, or {"value": ..., "label": ...})
+static bool is_option(const cJSON *item, const char *v)
+{
+    const cJSON *opt;
+    cJSON_ArrayForEach(opt, cJSON_GetObjectItem(item, "options")) {
+        const cJSON *value = cJSON_IsObject(opt) ? cJSON_GetObjectItem(opt, "value") : opt;
+        if (cJSON_IsString(value) && strcmp(value->valuestring, v) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+esp_err_t app_script_save_settings(const char *id, const cJSON *values, char *err, size_t err_size)
+{
+    char path[64];
+    snprintf(err, err_size, "%s", "");
+    snprintf(path, sizeof(path), BASE "/%.24s", id);
+    if (!mounted || !app_script_valid_id(id) || !is_dir(path)) {
+        snprintf(err, err_size, "no such app");
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (!cJSON_IsObject(values)) {
+        snprintf(err, err_size, "expected an object of settings");
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON *schema = manifest_settings(id);
+    snprintf(path, sizeof(path), BASE "/%.24s/settings.json", id);
+    cJSON *saved = read_json(path);
+    if (!cJSON_IsObject(saved)) {
+        cJSON_Delete(saved);
+        saved = cJSON_CreateObject();
+    }
+    esp_err_t result = ESP_OK;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, schema) {
+        const cJSON *key = cJSON_GetObjectItem(item, "key");
+        if (!cJSON_IsString(key)) {
+            continue;
+        }
+        const cJSON *v = cJSON_GetObjectItem(values, key->valuestring);
+        if (v == NULL) {
+            continue;                                       // not changed
+        }
+        const char *type = setting_type(item);
+        cJSON *keep = NULL;
+        if (strcmp(type, "bool") == 0 && cJSON_IsBool(v)) {
+            keep = cJSON_CreateBool(cJSON_IsTrue(v));
+        } else if (strcmp(type, "int") == 0 && cJSON_IsNumber(v) && v->valuedouble == (double)(long long)v->valuedouble) {
+            const cJSON *min = cJSON_GetObjectItem(item, "min"), *max = cJSON_GetObjectItem(item, "max");
+            if ((cJSON_IsNumber(min) && v->valuedouble < min->valuedouble) ||
+                (cJSON_IsNumber(max) && v->valuedouble > max->valuedouble)) {
+                snprintf(err, err_size, "%s is out of range", key->valuestring);
+                result = ESP_ERR_INVALID_ARG;
+                break;
+            }
+            keep = cJSON_CreateNumber(v->valuedouble);
+        } else if ((strcmp(type, "string") == 0 || strcmp(type, "secret") == 0) && cJSON_IsString(v) &&
+                   strlen(v->valuestring) <= 512) {
+            if (strcmp(type, "secret") == 0 && !v->valuestring[0]) {
+                continue;                                   // empty: keep the secret already saved
+            }
+            keep = cJSON_CreateString(v->valuestring);
+        } else if (strcmp(type, "choice") == 0 && cJSON_IsString(v) && is_option(item, v->valuestring)) {
+            keep = cJSON_CreateString(v->valuestring);
+        } else {
+            snprintf(err, err_size, "%s: not a valid %s", key->valuestring, type);
+            result = ESP_ERR_INVALID_ARG;
+            break;
+        }
+        cJSON_DeleteItemFromObject(saved, key->valuestring);
+        cJSON_AddItemToObject(saved, key->valuestring, keep);
+    }
+    if (result == ESP_OK) {
+        char *text = cJSON_PrintUnformatted(saved);
+        if (text == NULL || !write_file(path, text, strlen(text))) {
+            snprintf(err, err_size, "couldn't save (partition full?)");
+            result = ESP_FAIL;
+        }
+        free(text);
+    }
+    cJSON_Delete(saved);
+    cJSON_Delete(schema);
+    return result;
 }
 
 cJSON *app_script_list_json(void)

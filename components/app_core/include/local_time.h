@@ -10,7 +10,8 @@
  *
  * The time zone (UTC offset, including daylight saving) comes from the internet with each
  * weather forecast (Open-Meteo's "timezone=auto" for the configured location), which the
- * weather app downloads in the background whether or not it's on screen. It's remembered in
+ * Weather app (Lua, apps/weather) downloads in the background and passes on with
+ * time.set_zone(). It's remembered in
  * flash so it's right straight after power-on.
  */
 #pragma once

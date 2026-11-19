@@ -1,7 +1,9 @@
 # Adds a "Weather Display" menu to `idf.py menuconfig`.
 # Values chosen here end up in sdkconfig and are available in C as CONFIG_<NAME>.
 
-menu "Weather Display"
+menu "Wi-Fi"
+    # The option names still say WEATHER_ (they started out in the weather menu); keeping
+    # them means an existing sdkconfig keeps its Wi-Fi settings.
 
     config WEATHER_WIFI_SSID
         string "Wi-Fi network name (SSID)"
@@ -14,45 +16,6 @@ menu "Weather Display"
         default ""
         help
             Password for the network above. Leave empty for an open network.
-
-    config WEATHER_LATITUDE
-        string "Latitude"
-        default "40.7128"
-        help
-            Decimal latitude of the forecast location (north is positive).
-
-    config WEATHER_LONGITUDE
-        string "Longitude"
-        default "-74.0060"
-        help
-            Decimal longitude of the forecast location (east is positive, west is negative).
-
-    choice WEATHER_UNITS
-        prompt "Units"
-        default WEATHER_UNITS_IMPERIAL
-
-        config WEATHER_UNITS_IMPERIAL
-            bool "Fahrenheit / mph"
-
-        config WEATHER_UNITS_METRIC
-            bool "Celsius / km/h"
-    endchoice
-
-    config WEATHER_REFRESH_MINUTES
-        int "Minutes between full refreshes"
-        range 5 1440
-        default 60
-        help
-            How often the whole forecast is re-downloaded and the screen gets a
-            full (flashing) refresh, which also clears partial-refresh ghosting.
-
-    config WEATHER_PARTIAL_SECONDS
-        int "Seconds between partial refreshes"
-        range 5 3600
-        default 300
-        help
-            How often the current-conditions area is redrawn with a quick partial
-            refresh (no flashing). The board stays awake and online to do this.
 
 endmenu
 

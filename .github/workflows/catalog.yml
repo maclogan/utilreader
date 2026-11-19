@@ -1,0 +1,60 @@
+# The app catalog. On a pull request: checks every app in apps/ (and that changed apps raised
+# their version). On main: checks, builds the catalog and publishes it to GitHub Pages, where
+# the board's web page reads https://<owner>.github.io/<repo>/index.json.
+#
+# One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
+name: App catalog
+
+on:
+  pull_request:
+    paths: ["apps/**", "tools/catalog.py", "tools/app_icon.py", ".github/workflows/catalog.yml"]
+  push:
+    branches: [main]
+    paths: ["apps/**", "tools/catalog.py", "tools/app_icon.py", ".github/workflows/catalog.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: catalog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                # the version check compares with the base branch
+      - name: Install Lua (for the syntax check)
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - name: Check the apps
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          python3 tools/catalog.py check --require-luac --base "$base"
+
+  publish:
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the catalog
+        run: python3 tools/catalog.py build site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

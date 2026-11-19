@@ -11,6 +11,7 @@
 #include "battery.h"
 #include "buttons.h"                    // buttons_post(): app.close() wakes the main loop
 #include "epd.h"
+#include "esp_timer.h"                  // esp_timer_get_time(): time.uptime()
 #include "font16.h"
 #include "lauxlib.h"
 #include "local_time.h"
@@ -184,8 +185,16 @@ static int app_close(lua_State *L)
     return 0;
 }
 
+// app.showing(): true while this app is on screen (e.g. a background download decides
+// whether to redraw)
+static int app_showing_fn(lua_State *L)
+{
+    lua_pushboolean(L, app_is_showing(&script_from_lua(L)->app));
+    return 1;
+}
+
 static const luaL_Reg app_funcs[] = {
-    {"wake_in", app_wake_in}, {"close", app_close}, {NULL, NULL},
+    {"wake_in", app_wake_in}, {"close", app_close}, {"showing", app_showing_fn}, {NULL, NULL},
 };
 
 // ---------- time ----------
@@ -215,6 +224,14 @@ static int time_date(lua_State *L)
         lua_pushinteger(L, values[i]);
         lua_setfield(L, -2, keys[i]);
     }
+    return 1;
+}
+
+// time.uptime(): milliseconds since the board started. Never jumps (unlike time.now(),
+// which changes when the clock is set), so it's the one to measure intervals with.
+static int time_uptime(lua_State *L)
+{
+    lua_pushinteger(L, (lua_Integer)(esp_timer_get_time() / 1000));
     return 1;
 }
 
@@ -250,6 +267,7 @@ static int time_set_zone(lua_State *L)
 static const luaL_Reg time_funcs[] = {
     {"now", time_now}, {"date", time_date}, {"synced", time_synced},
     {"format_hm", time_format_hm}, {"zone", time_zone}, {"set_zone", time_set_zone},
+    {"uptime", time_uptime},
     {NULL, NULL},
 };
 

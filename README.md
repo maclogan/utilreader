@@ -7,7 +7,7 @@ switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 
 | App | What it does |
 |---|---|
-| **Weather** | 7-day forecast from [Open-Meteo](https://open-meteo.com) (free, no key), with a details screen per day |
+| **Weather** | 7-day forecast from [Open-Meteo](https://open-meteo.com) (free, no key), with a details screen per day; also sets the time zone (a Lua app) |
 | **Clock** | Local time in big digits, redrawn every minute (a Lua app: the example for writing your own) |
 | **Story** | A short Chinese graded-reader story written by Claude each day, with per-word pinyin and meaning lookup and a saved-words list |
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
@@ -58,6 +58,13 @@ appears. A shorter press does nothing, and with the lock switch on the device st
 board has no real power switch): Waveshare measures about 36 µW, so a battery lasts years.
 RESET also starts it.
 
+**Apps and the menu.** On the board's web page (**Transfer** app):
+- **Apps** reorders the menu and hides apps (they keep working in the background), and
+  has each Lua app's **Settings** (Weather's location and units, for example) and **Log**.
+- **Install an app** takes a `.zip` or a folder.
+- **App catalog** lists shared apps, installs them and offers updates
+  ([publishing yours](docs/api.md#sharing-your-app)).
+
 **Screens.** Titles stand in a narrow bar on the left edge, reading bottom to top, so
 the screen keeps its full height for content. On the main menu that bar shows the time,
 a padlock while locked, and the battery.
@@ -92,7 +99,7 @@ regenerates `sdkconfig`, so note your Wi-Fi/API settings first.
    terminal doesn't have `idf.py` on its PATH.
 2. Configure: `idf.py menuconfig`, or VS Code *ESP-IDF: SDK Configuration Editor*, or edit
    `sdkconfig` directly. Settings live under two menus:
-   - **Weather Display**: Wi-Fi SSID/password (2.4 GHz), latitude/longitude, units, refresh timings
+   - **Wi-Fi**: network name and password (2.4 GHz)
    - **Chinese Story**: Claude API key, model, HSK level, the hour a new story starts
 3. Build and flash: `idf.py -p COMx build flash` (the board's COM number: Device Manager →
    Ports, "USB Serial Device"). Watch the log with `idf.py -p COMx monitor` (close the
@@ -119,8 +126,11 @@ table).
 
 ```
 HARDWARE.md               parts, wiring, pinout, power
-docs/api.md               writing Lua apps
-apps/                     Lua apps bundled with the firmware (Clock)
+docs/api.md               writing Lua apps: quick start, then the reference
+apps/                     Lua apps: the catalog, and the ones bundled with the firmware
+                          (Weather, Clock)
+.github/workflows/        catalog.yml: checks apps/ and publishes the catalog to GitHub Pages
+tools/catalog.py          checks app packages; builds the catalog
 main/                     the launcher: start-up, main menu, event loop      (main/README.md)
 components/
   app_core/               what apps are built on: app_t interface, app registry,
@@ -138,7 +148,6 @@ components/
   webui/                  web server + page: pairing, book upload/convert, saved words
   net/                    Wi-Fi connection
   review/                 saved review words (shared by the story and flashcard apps)
-  app_weather/            Weather app
   app_story/              Story app
   app_flashcards/         Flashcards (Cards) app
   app_reader/             Books (e-reader) app
@@ -158,7 +167,7 @@ depends on, so the build enforces this.
                                        |
        +---------------+---------------+---------------+
        |               |               |               |
-  app_weather      app_script      app_story     app_flashcards
+  app_reader       app_script      app_story     app_flashcards
        |               |               |   \           /   |
        |               |               |    +- review -+   |
        +---------------+---------------+-------+-----------+

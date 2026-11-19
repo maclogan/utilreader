@@ -36,6 +36,8 @@ typedef struct script {
     bool wake_set;                      // app.wake_in() asked for on_tick() at wake_at
     TickType_t wake_at;
     bool frame_full;                    // what screen.begin() chose, for screen.finish()
+    uint32_t generation;                // changes on every load/unload: tells stale net answers apart
+    int net_pending;                    // net requests in flight
 } script_t;
 
 // The app a Lua state belongs to (stored in the state's extra space)
@@ -46,6 +48,15 @@ static inline script_t *script_from_lua(lua_State *L)
 
 // Registers the API modules (screen, ui, app, time, battery, storage, settings, log, print)
 void script_api_open(lua_State *L);
+void script_json_open(lua_State *L);    // json (script_json.c)
+void script_net_open(lua_State *L);     // net (script_net.c)
+
+// The app with this id if it's still the same loaded instance (generation), else NULL
+script_t *script_live(const char *id, uint32_t generation);
+
+// Calls the function sitting below `nargs` arguments on top of the app's stack (e.g. a net
+// callback). Errors stop the app as any callback error does (error screen if it's showing).
+void script_deliver(script_t *s, int nargs);
 
 // Adds a line to the app's log (serial log + the ring buffer the portal shows)
 void script_log(const script_t *s, const char *text);

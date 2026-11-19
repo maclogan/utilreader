@@ -2,8 +2,79 @@
 
 Apps are small Lua 5.4 programs. You write them in any text editor, put them in a folder
 or a `.zip`, and install them from the board's web page (**Transfer** app → **Apps** →
-**Install an app**). No compiler or SDK is needed. The built-in Clock
-([apps/clock](../apps/clock)) is a complete example.
+**Install an app**). No compiler or SDK is needed. The built-in Weather
+([apps/weather](../apps/weather)) and Clock ([apps/clock](../apps/clock)) are complete
+examples.
+
+## Quick start: from idea to a shared app
+
+**1. Write it.** Make a folder with two files:
+
+```
+myapp/
+  app.json
+  main.lua
+  icon.png     (optional: the menu icon, 32x32 black and white looks best)
+```
+
+`app.json` says what the app is:
+
+```json
+{
+  "id": "myapp",
+  "name": "My App",
+  "version": "1.0.0",
+  "api": 1,
+  "author": "you",
+  "description": "One line about what it does."
+}
+```
+
+`main.lua` says what it does. This one counts: right adds one, left takes one away, press
+resets, and the count is saved:
+
+```lua
+local count = tonumber(storage.read("count") or "0")
+
+local function draw(full)
+  screen.begin(full)
+  ui.sidebar("Counter")
+  screen.text(ui.content_x + 20, 40, tostring(count), 8)
+  screen.finish()
+end
+
+function on_open() draw(true) end
+
+function on_button(b)
+  if b == "right" then count = count + 1
+  elseif b == "left" then count = count - 1
+  elseif b == "select" then count = 0
+  else return end                -- "back": leave the app
+  storage.write("count", tostring(count))
+  draw(false)
+  return true
+end
+```
+
+**2. Try it on your board.** Open the **Transfer** app and go to the address it shows in a
+browser on the same Wi-Fi. Under **Apps → Install an app**, pick the folder (or a `.zip` of
+it). The app is on the board's menu straight away. **Log** shows your `print()` output and
+any errors; if the app crashes, the board shows the error and its line, and everything else
+keeps working. Edit, install again, repeat: the app's saved files and settings survive.
+
+**3. Share it.** Either:
+
+- **Send the zip.** Anyone can install it the same way.
+- **Publish it in the catalog**, so it appears on every board's **App catalog** page: fork
+  the repository, add your folder as `apps/<your id>/`, run
+  `python tools/catalog.py check`, and open a pull request. The same check runs on the pull
+  request; once it's merged, the catalog rebuilds. Details: [Sharing your app](#sharing-your-app)
+  and [apps/README.md](../apps/README.md).
+
+**4. Update it.** Raise `version` in `app.json` and install again (or open another pull
+request). Boards with the catalog's older version get an **Update** button.
+
+The rest of this page is the reference: everything an app can use.
 
 ## The package
 
@@ -44,7 +115,7 @@ together have about 2 MB.
 | `version` | | Shown in the portal. Dotted numbers, e.g. `1.2.0`; bundled apps update when the firmware brings a higher one |
 | `author`, `description` | | Shown in the portal |
 | `background` | | `true`: the app stays loaded and `on_background()` runs about every 30 s, even while it isn't open. Default `false`: loaded when opened, unloaded when closed |
-| `settings` | | Settings the user can change (`settings.get(key)`). Each has `key`, `label`, `type` (`bool`, `int`, `string`, `secret`, `choice`) and `default`. Editing them in the portal comes in a later firmware; until then apps get the defaults |
+| `settings` | | Settings the user changes on the board's web page (**Apps** → **Settings**), read with `settings.get(key)`. See [Settings](#settings) |
 
 ## How an app runs
 
@@ -134,7 +205,8 @@ Colors: `screen.BLACK` (0, the default) and `screen.WHITE` (1).
 | `time.synced()` | Whether the clock is set (from the internet, the clock chip or by hand) |
 | `time.format_hm([t])` | `"5:05 PM"`, or `nil` while the clock isn't set |
 | `time.zone()` | The time zone: seconds to add to UTC |
-| `time.set_zone(seconds)` | Sets the board's time zone. For apps that know the location (a weather app) |
+| `time.set_zone(seconds)` | Sets the board's time zone. For apps that know the location (Weather does this) |
+| `time.uptime()` | Milliseconds since the board started. Never jumps (`time.now()` does when the clock gets set), so measure intervals with it |
 | `battery.percent()` | 0-100, or `nil` without a battery |
 | `battery.state()` | `"none"`, `"discharging"`, `"charging"` or `"full"` |
 | `battery.millivolts()` | |
@@ -145,12 +217,72 @@ Colors: `screen.BLACK` (0, the default) and `screen.WHITE` (1).
 | `settings.get(key)` | A setting's value (the manifest's `default` until the user changes it) |
 | `app.wake_in(ms)` | Calls `on_tick()` in `ms` milliseconds (replaces any earlier request; a negative value cancels). One shot: ask again from `on_tick()` for a repeating timer |
 | `app.close()` | Leaves the app (back to the menu) |
+| `app.showing()` | Whether the app is on screen right now (a background download uses it to decide whether to redraw) |
 | `app.id`, `app.name`, `app.version`, `app.api` | |
 | `print(...)`, `log(...)` | A line in the app's log |
 
-Storing a table: there's no JSON module in API 1 yet (it comes with networking). Small
-data can be written as Lua, e.g. `storage.write("state", string.format("return {n=%d}", n))`,
-and read back with `load(storage.read("state"))()`.
+Storing a table: `storage.write("state", json.encode(t))`, and later
+`t = json.decode(storage.read("state") or "{}")`.
+
+## Settings
+
+Declare them in `app.json`; the board's web page builds a form from them (**Transfer** →
+**Apps** → **Settings**) and saving restarts the app with the new values.
+
+```json
+"settings": [
+  {"key": "city", "label": "City", "type": "string", "default": "Oslo"},
+  {"key": "metric", "label": "Metric units", "type": "bool", "default": true},
+  {"key": "interval", "label": "Minutes between updates", "type": "int", "min": 5, "max": 120, "default": 30},
+  {"key": "style", "label": "Style", "type": "choice", "default": "big",
+   "options": [{"value": "big", "label": "Big digits"}, {"value": "small", "label": "Small"}]},
+  {"key": "token", "label": "API token", "type": "secret"}
+]
+```
+
+| Type | Form field | `settings.get()` returns |
+|---|---|---|
+| `bool` | checkbox | `true` / `false` |
+| `int` | number, checked against `min` / `max` | an integer |
+| `string` | text (up to 512 characters) | a string |
+| `choice` | list of `options` (plain strings, or `{"value", "label"}`) | the chosen value |
+| `secret` | password field. The board never sends it back to the page; leaving it empty keeps the saved one. Never give it a `default` | a string, or `nil` |
+
+Until the user saves a value, `settings.get()` returns the `default` (or `nil` without one).
+Settings are kept when the app is updated, and removed with it.
+
+## Network and JSON
+
+Requests run in the background, so the screen and buttons keep working; the answer arrives
+later in a callback.
+
+```lua
+local ok, why = net.get("https://api.example.com/today?city=" .. settings.get("city"), nil,
+  function(status, body)
+    if status ~= 200 then
+      log("failed: " .. tostring(status or body))   -- status is nil when there was no answer
+      return
+    end
+    local data = json.decode(body)
+    -- ... use data; redraw with screen.begin(false) ... screen.finish() if app.showing()
+  end)
+if not ok then log("couldn't start: " .. why) end     -- e.g. too many requests at once
+```
+
+| Function | |
+|---|---|
+| `net.get(url, headers, callback)` | Starts an HTTP or HTTPS GET. `headers` is `nil` or a table like `{["Accept"] = "application/json"}`. Returns `true`, or `false` and a reason if it can't start |
+| `net.post(url, headers, body, callback)` | The same, sending `body` (a string, up to 64 KB). Set `Content-Type` in `headers` |
+| `callback(status, body)` | Called later: `status` is the HTTP status (200, 404, ...) and `body` the answer; or `status` is `nil` and `body` says why there was no answer |
+| `json.decode(text)` | JSON to Lua: objects become tables with string keys, arrays become tables indexed from 1, `null` becomes `nil`. Raises an error saying where the text is wrong (wrap it in `pcall` for untrusted input) |
+| `json.encode(value)` | Lua to JSON. A table with exactly the keys 1..n becomes an array; any other table an object (keys must be strings or numbers); an empty table becomes `{}` |
+
+- HTTPS servers are checked against the board's built-in root certificates.
+- Answers can be up to 256 KB; a request gives up after 15 s without data.
+- One app can have 2 requests in flight. Redirects aren't followed: use the final URL.
+- If the app is closed (and unloaded) before the answer arrives, the callback is dropped.
+  Apps with `"background": true` stay loaded, so their callbacks always arrive.
+- The answer's text and anything decoded from it count toward the app's 512 KB.
 
 ## Example: a counter
 
@@ -179,11 +311,29 @@ function on_button(b)
 end
 ```
 
+## Sharing your app
+
+Published apps live in the `apps/` folder of this repository, one folder per app, the same
+layout as any package. Every change is checked automatically, and the board's web page
+installs from the result (**Transfer** → **App catalog**).
+
+1. Write and test your app (install it from a folder on your board).
+2. Fork the repository, add `apps/<your id>/` with `app.json`, `main.lua`, `icon.png` and
+   optionally a `README.md`, and open a pull request.
+3. A check runs on the pull request (`tools/catalog.py check`): manifest rules, file names
+   and sizes, a Lua syntax check, an icon, and for an update, a higher `version` than
+   before. Run it yourself first: `python tools/catalog.py check`.
+4. Once merged, the catalog rebuilds and the app appears on every board's **App catalog**
+   (boards with an older version installed see **Update**).
+
+The catalog is a JSON file at `https://maclogan.github.io/utilreader/index.json` listing each
+app with a download link and a checksum. Anyone can host one (`python tools/catalog.py build
+<folder>` makes it from an `apps/` folder) and point the board's web page at its address.
+
 ## Compatibility promise
 
 Within API 1, functions are only ever added, never changed or removed, so an app written
 for API 1 keeps working on later firmware. A breaking change would be API 2, and the board
 would say so before installing.
 
-Coming in later versions: `net` (HTTP requests), `json`, settings forms in the portal, and
-an app catalog.
+API 1 also covers `net`, `json`, `time.uptime()` and `app.showing()`.

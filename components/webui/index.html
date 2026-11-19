@@ -15,6 +15,12 @@
   h1 { font-size: 20px; margin: 0 0 4px; }
   h2 { font-size: 16px; margin: 0 0 12px; }
   h3 { font-size: 14px; margin: 16px 0 6px; }
+  .icon { width: 32px; height: 32px; image-rendering: pixelated; vertical-align: middle; border: 1px solid var(--line); background: #fff; }
+  .badge { font-size: 12px; padding: 1px 6px; border-radius: 9px; background: var(--accent); color: var(--card); white-space: nowrap; }
+  button.small { padding: 2px 8px; font-size: 13px; }
+  .form { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+  .form .field { display: grid; grid-template-columns: 200px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
+  .form input[type=text], .form input[type=password], .form input[type=number], .form select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); width: 100%; }
   pre.log { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 220px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; margin: 8px 0 0; }
   .sub { color: var(--mute); margin: 0 0 20px; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
@@ -59,8 +65,15 @@
   <div id="app" class="hidden">
   <section>
     <h2>Apps</h2>
+    <p class="muted">The board's menu, in order. ↑ ↓ move an app, the checkbox shows or hides it (hidden apps
+      keep working in the background). Transfer and Power always stay.</p>
     <div id="apps" class="muted">Loading…</div>
-    <pre class="log hidden" id="applog"></pre>
+    <div id="appform" class="form hidden"></div>
+    <div id="logbox" class="hidden">
+      <div class="row"><b id="logtitle"></b> <label class="muted"><input type="checkbox" id="logwatch"> Keep updating</label>
+        <button class="small" id="logclose">Close</button></div>
+      <pre class="log" id="applog"></pre>
+    </div>
     <h3>Install an app</h3>
     <p class="muted">An app package: a <b>.zip</b>, or a folder, holding <b>app.json</b>, <b>main.lua</b> and
       optionally <b>icon.png</b> (turned into the 32×32 black-and-white icon here). Installing an app that's
@@ -72,6 +85,21 @@
     <div class="row">
       <div class="grow"><div class="bar"><div id="appprogress"></div></div></div>
       <span id="appstatus" class="muted"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>App catalog</h2>
+    <p class="muted">Apps shared by others. The list comes straight from the catalog's web address (your
+      browser fetches it); installing checks each download against the catalog's checksum.</p>
+    <div class="row">
+      <input type="text" id="catalogurl" class="grow" spellcheck="false">
+      <button id="loadcatalog">Load</button>
+    </div>
+    <div id="catalog" class="muted" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:8px">
+      <div class="grow"><div class="bar"><div id="catprogress"></div></div></div>
+      <span id="catstatus" class="muted"></span>
     </div>
   </section>
 
@@ -170,6 +198,7 @@ async function getJSON(url, opts) {
 
 async function loadInfo() {
   const i = await getJSON("/api/info");
+  if (i.app_api) boardApi = i.app_api;
   $("space").textContent = `${i.ip} · books: ${kb(i.total - i.free)} used, ${kb(i.free)} free`;
 }
 
@@ -199,30 +228,144 @@ async function loadWords() {
 }
 
 // ---------- apps ----------
+let boardApi = 1;                                   // highest app API the board runs (from /api/info)
+let installed = new Map();                          // id -> app.json fields of installed Lua apps
+let catalogApps = new Map();                        // id -> catalog entry, once a catalog is loaded
+
+// "1.10.0" vs "1.9" -> 1 / 0 / -1
+function compareVersions(a, b) {
+  const pa = String(a || "0").split(/[.-]/), pb = String(b || "0").split(/[.-]/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = parseInt(pa[i] || "0", 10) || 0, y = parseInt(pb[i] || "0", 10) || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+const updateFor = id => {
+  const c = catalogApps.get(id), have = installed.get(id);
+  return c && have && compareVersions(c.version, have.version) > 0 && c.api <= boardApi ? c : null;
+};
+
 async function loadApps() {
-  const apps = await getJSON("/api/apps");
-  if (!apps.length) { $("apps").innerHTML = "No apps installed."; return; }
-  $("apps").innerHTML = `<table><tr><th>App</th><th>Version</th><th>About</th><th></th></tr>` +
-    apps.map(a => `<tr><td><b>${esc(a.name || a.id)}</b><br><span class="muted">${esc(a.id)}</span></td>` +
-      `<td>${esc(a.version || "")}</td><td>${esc(a.description || "")}` +
-      (a.author ? `<br><span class="muted">by ${esc(a.author)}</span>` : "") + `</td>` +
-      `<td class="num"><button data-log="${esc(a.id)}">Log</button> ` +
-      `<button class="danger" data-del="${esc(a.id)}" data-name="${esc(a.name || a.id)}">Remove</button></td></tr>`).join("") +
-    `</table>`;
-  $("apps").querySelectorAll("button[data-log]").forEach(btn => btn.onclick = async () => {
-    const r = await api("/api/apps/log?id=" + btn.dataset.log);
-    const text = await r.text();
-    $("applog").textContent = `${btn.dataset.log}:\n` + (text || "(nothing logged since start-up)");
-    $("applog").classList.remove("hidden");
+  const [menu, apps] = await Promise.all([getJSON("/api/menu"), getJSON("/api/apps")]);
+  installed = new Map(apps.map(a => [a.id, a]));
+  const regular = menu.filter(m => !m.system);
+  $("apps").innerHTML = `<table><tr><th></th><th>Show</th><th>App</th><th>About</th><th></th></tr>` +
+    menu.map(m => {
+      const a = installed.get(m.id), up = updateFor(m.id), i = regular.indexOf(m);
+      const move = m.system ? "" :
+        `<button class="small" data-up="${i}" ${i === 0 ? "disabled" : ""}>↑</button>` +
+        `<button class="small" data-down="${i}" ${i === regular.length - 1 ? "disabled" : ""}>↓</button>`;
+      return `<tr><td style="white-space:nowrap">${move}</td>` +
+        `<td><input type="checkbox" data-show="${esc(m.id)}" ${m.hidden ? "" : "checked"} ${m.can_hide ? "" : "disabled"}></td>` +
+        `<td><b>${esc(m.name)}</b><br><span class="muted">${m.native ? "built in" : esc(m.id + " " + ((a && a.version) || ""))}</span></td>` +
+        `<td>${a ? esc(a.description || "") + (a.author ? `<br><span class="muted">by ${esc(a.author)}</span>` : "") : ""}` +
+        (up ? ` <span class="badge">${esc(up.version)} available</span>` : "") + `</td>` +
+        `<td class="num">${m.native ? "" :
+          (up ? `<button class="small primary" data-update="${esc(m.id)}">Update</button> ` : "") +
+          `<button class="small" data-settings="${esc(m.id)}">Settings</button> ` +
+          `<button class="small" data-log="${esc(m.id)}">Log</button> ` +
+          `<button class="small danger" data-del="${esc(m.id)}" data-name="${esc(m.name)}">Remove</button>`}</td></tr>`;
+    }).join("") + `</table>`;
+
+  // Order and visibility go back to the board as a whole
+  const save = async (order, hidden) => {
+    await api("/api/menu", { method: "POST", body: JSON.stringify({ order, hidden }) }).catch(() => {});
+    loadApps().catch(() => {});
+  };
+  const hiddenNow = () => menu.filter(m => m.hidden).map(m => m.id);
+  const orderNow = () => regular.map(m => m.id);
+  $("apps").querySelectorAll("[data-up],[data-down]").forEach(b => b.onclick = () => {
+    const order = orderNow(), i = +(b.dataset.up ?? b.dataset.down), j = b.dataset.up !== undefined ? i - 1 : i + 1;
+    [order[i], order[j]] = [order[j], order[i]];
+    save(order, hiddenNow());
   });
+  $("apps").querySelectorAll("[data-show]").forEach(c => c.onchange = () => {
+    const hidden = new Set(hiddenNow());
+    c.checked ? hidden.delete(c.dataset.show) : hidden.add(c.dataset.show);
+    save(orderNow(), [...hidden]);
+  });
+  $("apps").querySelectorAll("[data-settings]").forEach(b => b.onclick = () => showSettings(b.dataset.settings));
+  $("apps").querySelectorAll("[data-log]").forEach(b => b.onclick = () => showLog(b.dataset.log));
+  $("apps").querySelectorAll("[data-update]").forEach(b => b.onclick = () => installFromCatalog(catalogApps.get(b.dataset.update), "appstatus", "appprogress"));
   $("apps").querySelectorAll("button[data-del]").forEach(btn => btn.onclick = async () => {
     if (!confirm(`Remove "${btn.dataset.name}" with its settings and saved data?`)) return;
     btn.disabled = true;
     await api("/api/apps?id=" + btn.dataset.del, { method: "DELETE" }).catch(() => {});
     loadApps().catch(() => {});
+    if (catalogApps.size) showCatalog();
   });
 }
 
+// ---------- settings forms (from the "settings" in each app's app.json) ----------
+async function showSettings(id) {
+  const box = $("appform");
+  const j = await getJSON("/api/apps/settings?id=" + id).catch(e => ({ error: e.message }));
+  box.classList.remove("hidden");
+  if (j.error) { box.innerHTML = `<span class="err">${esc(j.error)}</span>`; return; }
+  const name = (installed.get(id) || {}).name || id;
+  if (!j.schema.length) {
+    box.innerHTML = `<b>${esc(name)}</b> has no settings. <button class="small" id="formclose">Close</button>`;
+    $("formclose").onclick = () => box.classList.add("hidden");
+    return;
+  }
+  const field = (s, i) => {
+    const v = s.key in j.values ? j.values[s.key] : s.default, fid = "set" + i;
+    let input;
+    if (s.type === "bool") input = `<input type="checkbox" id="${fid}" ${v ? "checked" : ""}>`;
+    else if (s.type === "int") input = `<input type="number" id="${fid}" value="${esc(v ?? "")}" step="1"` +
+      (s.min !== undefined ? ` min="${s.min}"` : "") + (s.max !== undefined ? ` max="${s.max}"` : "") + `>`;
+    else if (s.type === "choice") input = `<select id="${fid}">` + (s.options || []).map(o => {
+      const value = typeof o === "object" ? o.value : o, label = typeof o === "object" ? (o.label || o.value) : o;
+      return `<option value="${esc(value)}" ${value === v ? "selected" : ""}>${esc(label)}</option>`;
+    }).join("") + `</select>`;
+    else if (s.type === "secret") input = `<input type="password" id="${fid}" autocomplete="off" placeholder="` +
+      (j.secrets_set.includes(s.key) ? "saved (leave empty to keep it)" : "not set") + `">`;
+    else input = `<input type="text" id="${fid}" value="${esc(v ?? "")}" spellcheck="false">`;
+    return `<div class="field"><label for="${fid}">${esc(s.label || s.key)}</label>${input}</div>`;
+  };
+  box.innerHTML = `<b>${esc(name)}: settings</b>` + j.schema.map(field).join("") +
+    `<div class="row"><button class="primary" id="formsave">Save</button><button id="formclose">Close</button>` +
+    `<span id="formstatus" class="muted"></span></div>`;
+  $("formclose").onclick = () => box.classList.add("hidden");
+  $("formsave").onclick = async () => {
+    const values = {};
+    j.schema.forEach((s, i) => {
+      const el = $("set" + i);
+      if (s.type === "bool") values[s.key] = el.checked;
+      else if (s.type === "int") values[s.key] = Math.trunc(Number(el.value));
+      else if (s.type === "secret") { if (el.value) values[s.key] = el.value; }
+      else values[s.key] = el.value;
+    });
+    const r = await api("/api/apps/settings?id=" + id, { method: "POST", body: JSON.stringify(values) }).catch(() => null);
+    const res = r ? await r.json().catch(() => ({})) : {};
+    $("formstatus").innerHTML = r && r.ok ? "Saved: the app restarts with them" : `<span class="err">${esc(res.error || "not saved")}</span>`;
+  };
+}
+
+// ---------- log ----------
+let logTimer = null, logId = null;
+async function refreshLog() {
+  if (!logId) return;
+  const text = await api("/api/apps/log?id=" + logId).then(r => r.text()).catch(() => null);
+  if (text === null) return;
+  const el = $("applog"), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  el.textContent = text || "(nothing logged since start-up)";
+  if (atEnd) el.scrollTop = el.scrollHeight;
+}
+function showLog(id) {
+  logId = id;
+  $("logtitle").textContent = "Log: " + ((installed.get(id) || {}).name || id);
+  $("logbox").classList.remove("hidden");
+  refreshLog();
+}
+$("logwatch").onchange = () => {
+  clearInterval(logTimer);
+  if ($("logwatch").checked) logTimer = setInterval(refreshLog, 2000);
+};
+$("logclose").onclick = () => { logId = null; $("logwatch").checked = false; clearInterval(logTimer); $("logbox").classList.add("hidden"); };
+
+// ---------- installing ----------
 const APP_ID = /^[a-z0-9_]{1,24}$/;
 const APP_FILE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,31}$/;
 const SKIP = new Set(["icon.png", "README.md", "readme.md", "LICENSE"]);   // for people, not the device
@@ -245,9 +388,9 @@ async function iconBits(pngBytes) {
 }
 
 // files: Map of name -> Uint8Array, the package's top-level files
-async function installApp(files) {
-  const status = t => $("appstatus").innerHTML = t;
-  $("appprogress").style.width = "0";
+async function installApp(files, statusId, progressId) {
+  const status = t => $(statusId).innerHTML = t;
+  $(progressId).style.width = "0";
   if (!files.has("app.json")) throw new Error("no app.json in the package");
   let m;
   try { m = JSON.parse(new TextDecoder().decode(files.get("app.json"))); }
@@ -255,6 +398,7 @@ async function installApp(files) {
   if (!APP_ID.test(m.id || "")) throw new Error("app.json id must be 1-24 of a-z, 0-9, _");
   if (!m.name) throw new Error("app.json has no name");
   if (!Number.isInteger(m.api)) throw new Error("app.json has no api version");
+  if (m.api > boardApi) throw new Error(`needs app API ${m.api}; this board's firmware has API ${boardApi}`);
   if (!files.has("main.lua")) throw new Error("no main.lua in the package");
 
   const send = new Map([["app.json", files.get("app.json")]]);   // first: it starts the upload (new=1)
@@ -288,7 +432,7 @@ async function installApp(files) {
       failures = 0;
       done += j.have - offset;
       offset = j.have;
-      $("appprogress").style.width = (100 * done / total).toFixed(1) + "%";
+      $(progressId).style.width = (100 * done / total).toFixed(1) + "%";
       status(`Sending ${esc(name)}`);
     }
   }
@@ -297,7 +441,8 @@ async function installApp(files) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
   status(`Installed ${esc(m.name)} ${esc(m.version || "")}: it's on the board's menu`);
-  loadApps().catch(() => {});
+  await loadApps().catch(() => {});
+  if (catalogApps.size) showCatalog();
 }
 
 // Top-level files of a package; a zip may hold them inside one folder ("clock/app.json")
@@ -310,13 +455,13 @@ function packageFiles(entries) {        // entries: [[path, getBytes]]
     .map(([p, get]) => [p.slice(base.length), get]);
 }
 
-async function installFrom(entries) {
+async function installFrom(entries, statusId = "appstatus", progressId = "appprogress") {
   try {
     const files = new Map();
     for (const [name, get] of packageFiles(entries)) files.set(name, await get());
-    await installApp(files);
+    await installApp(files, statusId, progressId);
   } catch (e) {
-    $("appstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    $(statusId).innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 }
 
@@ -337,6 +482,98 @@ $("appdir").onchange = async () => {
   await installFrom(list.map(f => [f.webkitRelativePath, async () => new Uint8Array(await f.arrayBuffer())]));
   $("appdir").value = "";
 };
+
+// ---------- catalog ----------
+// index.json: {"format": 1, "apps": [{id, name, version, api, author, description, url, sha256, size, icon}]}
+const DEFAULT_CATALOG = "https://maclogan.github.io/utilreader/index.json";
+let catalogUrl = DEFAULT_CATALOG;
+try { catalogUrl = localStorage.getItem("catalog") || DEFAULT_CATALOG; } catch {}
+$("catalogurl").value = catalogUrl;
+
+// SHA-256 (the page is plain http, where browsers don't offer crypto.subtle)
+function sha256(bytes) {
+  const K = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,
+    0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,
+    0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,
+    0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,
+    0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+  const h = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const len = bytes.length, padded = new Uint8Array(((len + 9 + 63) >> 6) << 6);
+  padded.set(bytes);
+  padded[len] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 8, Math.floor(len / 0x20000000));
+  dv.setUint32(padded.length - 4, (len << 3) >>> 0);
+  const w = new Uint32Array(64), rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    [a, b, c, d, e, f, g, hh].forEach((v, i) => h[i] = (h[i] + v) >>> 0);
+  }
+  return [...h].map(x => x.toString(16).padStart(8, "0")).join("");
+}
+
+function showCatalog() {
+  if (!catalogApps.size) { $("catalog").innerHTML = "The catalog is empty."; return; }
+  $("catalog").innerHTML = `<table>` + [...catalogApps.values()].map(c => {
+    const have = installed.get(c.id);
+    let action;
+    if (c.api > boardApi) action = `<span class="muted">needs a newer firmware</span>`;
+    else if (!have) action = `<button class="small primary" data-get="${esc(c.id)}">Install</button>`;
+    else if (compareVersions(c.version, have.version) > 0) action = `<button class="small primary" data-get="${esc(c.id)}">Update</button>`;
+    else action = `<span class="muted">installed</span>`;
+    return `<tr><td>${c.icon ? `<img class="icon" alt="" src="${esc(c.icon)}">` : ""}</td>` +
+      `<td><b>${esc(c.name)}</b> <span class="muted">${esc(c.version)}</span><br>${esc(c.description || "")}` +
+      (c.author ? ` <span class="muted">by ${esc(c.author)}</span>` : "") + `</td>` +
+      `<td class="num">${c.size ? kb(c.size) : ""}</td><td class="num">${action}</td></tr>`;
+  }).join("") + `</table>`;
+  $("catalog").querySelectorAll("[data-get]").forEach(b => b.onclick = () => installFromCatalog(catalogApps.get(b.dataset.get), "catstatus", "catprogress"));
+}
+
+async function loadCatalog() {
+  catalogUrl = $("catalogurl").value.trim() || DEFAULT_CATALOG;
+  try { localStorage.setItem("catalog", catalogUrl); } catch {}
+  $("catalog").textContent = "Loading…";
+  try {
+    const r = await fetch(catalogUrl, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const index = await r.json();
+    if (!Array.isArray(index.apps)) throw new Error("not a catalog (no apps list)");
+    catalogApps = new Map(index.apps.filter(a => APP_ID.test(a.id || "")).map(a => [a.id, a]));
+    showCatalog();
+    loadApps().catch(() => {});                     // shows "update available" badges
+  } catch (e) {
+    $("catalog").innerHTML = `<span class="err">Couldn't load the catalog: ${esc(e.message)}</span>`;
+  }
+}
+$("loadcatalog").onclick = loadCatalog;
+
+async function installFromCatalog(c, statusId, progressId) {
+  const status = t => $(statusId).innerHTML = t;
+  try {
+    status(`Downloading ${esc(c.name)}…`);
+    const r = await fetch(new URL(c.url, catalogUrl), { cache: "no-store" });
+    if (!r.ok) throw new Error("download failed: HTTP " + r.status);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (c.sha256 && sha256(bytes) !== c.sha256.toLowerCase()) throw new Error("the download doesn't match the catalog's checksum");
+    const read = await readZip(bytes.buffer);
+    await installFrom(read.names.filter(n => !n.endsWith("/")).map(n => [n, () => read(n)]), statusId, progressId);
+  } catch (e) {
+    status(`<span class="err">${esc(e.message)}</span>`);
+  }
+}
 
 function refresh() {
   $("app").classList.remove("hidden");

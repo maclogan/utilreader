@@ -7,7 +7,7 @@ exist; it knows nothing about what happens inside them.
 |---|---|
 | `main.c` | Start-up sequence, registering the native apps, the event loop |
 | `menu_ui.c/.h` | Draws the row of app tiles (scrolls when there are more than 4) |
-| `Kconfig.projbuild` | The *Weather Display* and *Chinese Story* menus in `idf.py menuconfig` |
+| `Kconfig.projbuild` | The *Wi-Fi*, *Chinese Story* and *Hardware* menus in `idf.py menuconfig` |
 | `CMakeLists.txt` | Which components the launcher uses |
 
 ## Start-up (`app_main`)
@@ -26,7 +26,7 @@ exist; it knows nothing about what happens inside them.
 6. Internet time via SNTP, re-checked hourly; every sync is copied to the clock chip
    (`on_internet_time()`). Start-up waits up to 10 s for the first sync only if the clock
    isn't set yet.
-7. Every app's `background()` once, so downloads start immediately (the weather app
+7. Every app's `background()` once (hidden apps too), so downloads start immediately (the Weather app
    fetches the forecast, which also provides the time zone).
 8. Back to where it was: the app whose id is in the `last_app_id` setting, or the menu if `on_menu` is
    set (a new board starts on the menu). Apps with `no_resume` set (Transfer, Power) are

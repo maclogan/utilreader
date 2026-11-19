@@ -1,7 +1,7 @@
 # net: Wi-Fi
 
-Joins the 2.4 GHz network set in menuconfig (*Weather Display → Wi-Fi network name /
-password*). The ESP32-S3 can't use 5 GHz networks.
+Joins the 2.4 GHz network set in menuconfig (*Wi-Fi → Wi-Fi network name / password*;
+the options are still called `CONFIG_WEATHER_WIFI_*`, from when they sat in the weather menu). The ESP32-S3 can't use 5 GHz networks.
 
 ```c
 esp_err_t err = wifi_connect();   // blocks until online, up to 20 s
@@ -27,6 +27,6 @@ WIFI_EVENT_STA_DISCONNECTED   -> count the attempt, connect again
 IP_EVENT_STA_GOT_IP           -> reset the count, tell wifi_connect() we're online
 ```
 
-Making HTTPS requests is up to each app (see `app_weather/weather_api.c` and
-`app_story/story.c`, which use `esp_http_client` with the built-in certificate bundle).
+Making HTTPS requests is up to each app (see `app_story/story.c` and, for Lua apps,
+`app_script/script_net.c`, which use `esp_http_client` with the built-in certificate bundle).
 Run them on the worker (`app_core/worker.h`), never in the main task.

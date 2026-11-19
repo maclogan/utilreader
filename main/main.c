@@ -40,7 +40,6 @@
 #include "storage.h"                    // storage_init()
 #include "story_app.h"
 #include "ui_loading.h"                 // ui_show_loading()
-#include "weather_app.h"
 #include "wifi.h"                       // wifi_connect()
 #include "worker.h"                     // background jobs
 
@@ -50,11 +49,10 @@ static const char *TAG = "main";
 // system apps (Transfer, Settings, Power) always come last.
 static void register_apps(void)
 {
-    app_registry_add(&weather_app, false);
     app_registry_add(&story_app, false);
     app_registry_add(&flashcards_app, false);
     app_registry_add(&reader_app, false);
-    app_script_init();                                      // Clock and any installed apps
+    app_script_init();                                      // Weather, Clock and any installed apps
     app_registry_add(&transfer_app, true);
     app_registry_add(&settings_app, true);
     app_registry_add(&power_app, true);
@@ -129,10 +127,11 @@ static void go_home(const char *why)
 // Calls every app's background() (they rate-limit themselves)
 static void run_background(void)
 {
-    for (int i = 0; i < app_count(); i++) {
-        const app_t *app = app_at(i);
-        if (app->background) {
-            app->background(app);
+    int n;
+    const app_t *const *all = app_registry_all(&n);         // hidden apps keep working in the background
+    for (int i = 0; i < n; i++) {
+        if (all[i]->background) {
+            all[i]->background(all[i]);
         }
     }
 }
@@ -170,10 +169,11 @@ void app_main(void)
     books_init();                                           // /books (e-books)
     worker_init();                                          // background jobs
     register_apps();
-    for (int i = 0; i < app_count(); i++) {
-        const app_t *app = app_at(i);
-        if (app->init) {
-            app->init(app);
+    int all_count;
+    const app_t *const *all = app_registry_all(&all_count);
+    for (int i = 0; i < all_count; i++) {
+        if (all[i]->init) {
+            all[i]->init(all[i]);
         }
     }
     buttons_init();
@@ -248,8 +248,9 @@ void app_main(void)
             continue;
         }
 
-        // Apps were installed or removed (web portal, so Transfer is on screen): reload the
-        // script apps, keeping the same tile highlighted. Apps never see this event.
+        // Apps were installed, removed or reconfigured, or the menu was reordered (web portal,
+        // so Transfer is on screen): reload the script apps and the menu preferences, keeping
+        // the same tile highlighted. Apps never see this event.
         if (event == BUTTON_APPS_CHANGED) {
             char keep[32];
             snprintf(keep, sizeof(keep), "%s", app_at(selected)->id);
@@ -258,6 +259,7 @@ void app_main(void)
                 app = NULL;
             }
             app_script_rescan();
+            app_registry_reload_prefs();
             int index = app_registry_find(keep);
             selected = index >= 0 ? index : 0;
             if (app == NULL) {

@@ -1,5 +1,5 @@
 /*
- * Joins the Wi-Fi network set in menuconfig ("Weather Display" menu).
+ * Joins the Wi-Fi network set in menuconfig ("Wi-Fi" menu).
  */
 #pragma once
 

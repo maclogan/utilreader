@@ -7,7 +7,7 @@ A small web server (ESP-IDF `esp_http_server`, port 80) and the single page it s
 | File | What it does |
 |---|---|
 | `webui.c`, `include/webui.h` | Server, API handlers, pairing, status for the Transfer app |
-| `index.html` | The page: pairing, apps (install from zip/folder, log, remove), books, upload with conversion, saved words (plain JS, no libraries) |
+| `index.html` | The page: pairing, apps (menu order and hiding, settings forms, log, install from zip/folder or the catalog, updates, remove), books, upload with conversion, saved words (plain JS, no libraries) |
 
 ## Pairing
 
@@ -33,7 +33,7 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `GET /` | The page |
 | `POST /api/pair` | Show a pairing code on the board → `{"seconds":180}` |
 | `POST /api/pair/verify?code=N` | → `{"token":"..."}`, or 403 `{"error","triesLeft"}`, or 410 (no code) |
-| `GET /api/info` | `{"ip","total","free"}` (books partition, bytes) |
+| `GET /api/info` | `{"ip","total","free","app_api"}` (books partition, bytes; the highest app API the firmware runs) |
 | `GET /api/books` | `[{"id","title","size","progress"}]` |
 | `DELETE /api/books?id=ID` | Delete a book (and its index, chapters, position) |
 | `POST /api/upload?id=ID&offset=N&total=T` | Body: the next chunk (≤ 64 KB) → `{"have","done"}`; 409 `{"have"}` if out of step; 507 if full |
@@ -43,6 +43,20 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `POST /api/apps/install?id=ID` | Install the uploaded package → `{"installed":true}`, or 400 `{"error"}` (bad manifest, API too new, no main.lua). The menu updates straight away |
 | `DELETE /api/apps?id=ID` | Remove an app with its settings and data |
 | `GET /api/apps/log?id=ID` | The app's recent log (text): `print()` output and errors |
+| `GET /api/apps/settings?id=ID` | `{"schema","values","secrets_set"}`: the settings from the app's app.json and their values (secret values are never sent) |
+| `POST /api/apps/settings?id=ID` | Body `{"key": value, ...}`: checked against the schema and saved; the app restarts with them. 400 `{"error"}` names a bad value |
+| `GET /api/menu` | Every app in menu order `[{"id","name","hidden","can_hide","system","native"}]` |
+| `POST /api/menu` | Body `{"order": [ids of the regular apps], "hidden": [ids]}`: the menu updates straight away |
+
+## The app catalog
+
+The **App catalog** section fetches a catalog's `index.json` straight from the browser
+(default `https://maclogan.github.io/utilreader/index.json`, changeable on the page and
+remembered in the browser). Installing downloads the app's zip, checks its SHA-256 against
+the catalog (with a small built-in implementation: browsers don't offer `crypto.subtle` on
+plain-http pages like this one), then installs it like any zip. Apps the catalog has in a
+higher version get an **Update** button in the Apps list. The board itself never goes to
+the catalog; the browser does. See `tools/catalog.py` for the format.
 
 ## Uploading
 
