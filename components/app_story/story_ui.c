@@ -1,0 +1,236 @@
+#include "story_ui.h"
+
+#include <stdio.h>                      // snprintf()
+#include "epd_2in13.h"                  // drawing primitives + display refresh
+#include "font16.h"                     // Chinese / pinyin text
+#include "review.h"                     // review_contains()
+
+// Layout (pixels). The screen is 250 wide x 122 tall.
+#define MARGIN      4                   // left/right edge of text
+#define HEADER_LINE 17                  // rule under the title
+#define TEXT_Y      21                  // top of the first text row
+#define ROW_H       19                  // 16 px characters + room for the new-word underline
+#define TEXT_ROWS   3                   // rows of text that fit above the lookup area
+#define LOOKUP_LINE 86                  // rule above the pinyin/meaning area
+#define PINYIN_Y    88
+#define MEANING_Y   105
+
+// True for Chinese punctuation, which may hang past the right margin rather than start a row
+static bool is_punctuation(uint32_t cp)
+{
+    return (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF00 && cp <= 0xFFEF);
+}
+
+// Story menu layout
+#define ITEM_Y      21                  // top of the first item
+#define ITEM_H      25                  // item spacing (4 items fit)
+#define ITEM_BOX_H  23                  // highlight bar height
+
+// Saved words layout: each entry is word + pinyin on one row, meaning below
+#define SAVED_Y     20                  // top of the first entry
+#define SAVED_H     34                  // entry height
+
+// Draws text clipped at the right margin (meanings are short, but don't trust that)
+static void draw_clipped(int x, int y, const char *text, uint8_t color)
+{
+    uint32_t cp;
+    while ((cp = font16_next_char(&text)) != 0) {
+        if (x + font16_char_width(cp) > EPD_WIDTH - MARGIN) {
+            break;
+        }
+        x += font16_draw_char(x, y, cp, 1, color);
+    }
+}
+
+// Small tag like "SAVED" in the opposite color of `color`, right edge at x. Returns its left edge.
+static int draw_tag(int right, int y, const char *text, uint8_t color)
+{
+    int w = epd_text_width(text, 1) + 6;
+    epd_draw_rect(right - w, y, w, 11, color, true);
+    epd_draw_text(right - w + 3, y + 2, text, 1, !color);
+    return right - w;
+}
+
+// Title on the left (UTF-8), small counter like "3/12" on the right, rule underneath
+static void draw_header(const char *title, const char *counter)
+{
+    font16_draw_text(MARGIN, 0, title, EPD_BLACK);
+    if (counter) {
+        epd_draw_text(EPD_WIDTH - MARGIN - epd_text_width(counter, 1), 5, counter, 1, EPD_BLACK);
+    }
+    epd_draw_hline(0, HEADER_LINE, EPD_WIDTH, EPD_BLACK);
+}
+
+// Wakes the panel for a full refresh, or falls back to full if a partial isn't possible
+static bool begin(bool full)
+{
+    if (!full && !epd_is_awake()) {
+        full = true;                                        // partial refresh needs an awake panel
+    }
+    if (full) {
+        epd_init();                                         // wake + fully reset the panel
+    }
+    epd_clear(EPD_WHITE);
+    return full;
+}
+
+static void finish(bool full)
+{
+    if (full) {
+        epd_display();                                      // full refresh (~2 s, flashes)
+    } else {
+        epd_display_partial();                              // quick refresh, only changes update
+    }
+}
+
+// Lays out tokens first..first+count-1 as running text, wrapping by character.
+// draw = true draws them (rows past TEXT_ROWS are cut off); draw = false only measures.
+// Returns the number of rows the text needs.
+static int layout(const story_t *s, int first, int count, int cursor, bool draw)
+{
+    int x = MARGIN, row = 0;
+
+    for (int i = first; i < first + count; i++) {
+        const story_token_t *t = &s->tokens[i];
+        bool highlighted = (i == cursor);
+        const char *p = t->w;
+        uint32_t cp;
+        while ((cp = font16_next_char(&p)) != 0) {
+            int w = font16_char_width(cp);
+            if (x + w > EPD_WIDTH - MARGIN && !(is_punctuation(cp) && x + w <= EPD_WIDTH)) {
+                x = MARGIN;                                 // next row
+                row++;
+            }
+            int y = TEXT_Y + row * ROW_H;
+            if (!draw || row >= TEXT_ROWS) {
+                x += w;                                     // measuring, or past the bottom
+                continue;
+            }
+            if (highlighted) {                              // cursor: white on black
+                epd_draw_rect(x, y - 1, w, FONT16_HEIGHT + 2, EPD_BLACK, true);
+                font16_draw_char(x, y, cp, 1, EPD_WHITE);
+            } else {
+                font16_draw_char(x, y, cp, 1, EPD_BLACK);
+                if (t->is_new) {
+                    epd_draw_hline(x + 1, y + FONT16_HEIGHT + 1, w - 2, EPD_BLACK);  // underline new words
+                }
+            }
+            x += w;
+        }
+    }
+    return count > 0 ? row + 1 : 0;
+}
+
+void story_ui_paginate(story_t *s)
+{
+    s->page_count = 0;
+    for (int i = 0; i < s->sentence_count; ) {
+        // Start a page with sentence i, then add following sentences while they still fit
+        int first = s->sentences[i].first;
+        int count = s->sentences[i].count;
+        for (i++; i < s->sentence_count; i++) {
+            int with_next = s->sentences[i].first + s->sentences[i].count - first;
+            if (layout(s, first, with_next, -1, false) > TEXT_ROWS) {
+                break;
+            }
+            count = with_next;
+        }
+        s->pages[s->page_count++] = (story_span_t){first, count};
+    }
+}
+
+void story_ui_show(const story_t *s, int page, int cursor, bool full)
+{
+    full = begin(full);
+
+    char page_text[24];
+    snprintf(page_text, sizeof(page_text), "%d/%d", page + 1, s->page_count);
+    draw_header(s->title, page_text);
+
+    layout(s, s->pages[page].first, s->pages[page].count, cursor, true);
+
+    // Lookup area: the highlighted word's pinyin and meaning
+    epd_draw_hline(0, LOOKUP_LINE, EPD_WIDTH, EPD_BLACK);
+    if (cursor >= 0) {
+        const story_token_t *t = &s->tokens[cursor];
+        int tag_x = EPD_WIDTH - MARGIN;
+        if (review_contains(t->w)) {
+            tag_x = draw_tag(tag_x, PINYIN_Y + 3, "SAVED", EPD_BLACK) - 4;
+        }
+        if (t->is_new) {
+            draw_tag(tag_x, PINYIN_Y + 3, "NEW", EPD_BLACK);
+        }
+        font16_draw_text(MARGIN, PINYIN_Y, t->p, EPD_BLACK);
+        draw_clipped(MARGIN, MEANING_Y, t->d, EPD_BLACK);
+    }
+
+    finish(full);
+}
+
+void story_ui_show_menu(const char *const items[], int count, int selected, bool full)
+{
+    full = begin(full);
+    draw_header("故事  Story", NULL);
+
+    for (int i = 0; i < count; i++) {
+        int y = ITEM_Y + i * ITEM_H;
+        uint8_t color = EPD_BLACK;
+        if (i == selected) {                                // highlight: white text on a black bar
+            epd_draw_rect(0, y, EPD_WIDTH, ITEM_BOX_H, EPD_BLACK, true);
+            color = EPD_WHITE;
+        }
+        epd_draw_text(MARGIN + 6, y + (ITEM_BOX_H - 14) / 2, items[i], 2, color);
+    }
+
+    finish(full);
+}
+
+void story_ui_show_saved(const review_entry_t *entries, int count, int top, int cursor, bool full)
+{
+    full = begin(full);
+
+    char counter[24];
+    snprintf(counter, sizeof(counter), "%d/%d", count ? cursor + 1 : 0, count);
+    draw_header("生词  Saved words", counter);
+
+    if (count == 0) {
+        const char *line1 = "No saved words yet";
+        const char *line2 = "SELECT a word in a story to save it";
+        epd_draw_text((EPD_WIDTH - epd_text_width(line1, 1)) / 2, 55, line1, 1, EPD_BLACK);
+        epd_draw_text((EPD_WIDTH - epd_text_width(line2, 1)) / 2, 70, line2, 1, EPD_BLACK);
+    }
+
+    for (int i = 0; i < STORY_UI_SAVED_ROWS && top + i < count; i++) {
+        const review_entry_t *e = &entries[top + i];
+        int y = SAVED_Y + i * SAVED_H;
+        uint8_t color = EPD_BLACK;
+        if (top + i == cursor) {                            // highlight: white on black
+            epd_draw_rect(0, y - 1, EPD_WIDTH, SAVED_H, EPD_BLACK, true);
+            color = EPD_WHITE;
+        }
+        int x = font16_draw_text(MARGIN, y, e->w, color);   // 可是  kěshì            REMOVED
+        font16_draw_text(x + 8, y, e->p, color);            // but, however
+        if (!e->saved) {
+            draw_tag(EPD_WIDTH - MARGIN, y + 3, "REMOVED", color);
+        }
+        draw_clipped(MARGIN, y + FONT16_HEIGHT, e->d, color);
+    }
+
+    finish(full);
+}
+
+void story_ui_show_message(const char *title, const char *detail)
+{
+    const char *hint = "EXIT to go back";
+    epd_init();
+    epd_clear(EPD_WHITE);
+    font16_draw_text((EPD_WIDTH - font16_text_width(title)) / 2, 34, title, EPD_BLACK);
+    epd_draw_text((EPD_WIDTH - epd_text_width(detail, 1)) / 2, 64, detail, 1, EPD_BLACK);
+    epd_draw_text((EPD_WIDTH - epd_text_width(hint, 1)) / 2, 100, hint, 1, EPD_BLACK);
+    epd_display();
+}
+
+void story_ui_draw_app_icon(int cx, int cy)
+{
+    font16_draw_char(cx - 16, cy - 16, 0x6587, 2, EPD_BLACK);   // 文 ("writing"), drawn at 2x
+}

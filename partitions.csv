@@ -1,0 +1,10 @@
+# Name,   Type, SubType, Offset,  Size
+# nvs/phy_init keep the same offsets as the old single-app table, so stored Wi-Fi data survives.
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 4M
+# Files for the story app: today's story, words already introduced, saved review words
+storage,  data, spiffs,  ,        1M
+# E-books (FAT with wear levelling), uploaded through the web interface. Fills the rest of
+# the 8 MB flash: 0x510000 - 0x800000.
+books,    data, fat,     ,        0x2F0000

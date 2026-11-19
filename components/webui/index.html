@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E-paper board</title>
+<style>
+  :root { --bg:#f6f6f3; --card:#fff; --ink:#1d1d1b; --mute:#6b6b66; --line:#deded8; --accent:#2f5d8a; --bad:#a33; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --card:#21211f; --ink:#ececea; --mute:#9a9a94; --line:#3a3a37; --accent:#8db4dc; --bad:#e88; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .sub { color: var(--mute); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 600; font-size: 13px; }
+  td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .zh { font-size: 18px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--card); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text] { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); width: 100%; }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 200px; }
+  .muted { color: var(--mute); }
+  .err { color: var(--bad); }
+  pre.preview { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 140px; overflow: auto; font: inherit; margin: 8px 0; }
+  .hidden { display: none; }
+  .scroll { max-height: 420px; overflow: auto; }
+  input.code { font-size: 28px; letter-spacing: 6px; width: 9ch; text-align: center; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <h1>E-paper board</h1>
+  <p class="sub" id="space"></p>
+
+  <section id="pair" class="hidden">
+    <h2>Pair this browser</h2>
+    <p class="muted">To manage the board from this browser, show a code on the board's screen and type it here.</p>
+    <div class="row">
+      <button class="primary" id="showcode">Show code on the board</button>
+      <input class="code" id="code" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+      <button id="verify">Pair</button>
+      <span id="pairstatus" class="muted"></span>
+    </div>
+  </section>
+
+  <div id="app" class="hidden">
+  <section>
+    <h2>Books</h2>
+    <div id="books" class="muted">Loading…</div>
+  </section>
+
+  <section>
+    <h2>Add a book</h2>
+    <p class="muted">A <b>.txt</b> (UTF-8 or GB18030/GBK), <b>.epub</b> or <b>.html</b> file. It's converted here in
+      the browser to plain text the device can show (no images, tidy paragraphs, only characters its font has),
+      with chapters marked from the book's table of contents or its chapter headings, then sent in small pieces.</p>
+    <input type="file" id="file" accept=".txt,.epub,.html,.htm">
+    <div id="converted" class="hidden">
+      <p id="stats" class="muted"></p>
+      <label>Title <input type="text" id="title"></label>
+      <pre class="preview" id="preview"></pre>
+      <div class="row">
+        <button class="primary" id="upload">Upload to the device</button>
+        <div class="grow"><div class="bar"><div id="progress"></div></div></div>
+        <span id="status" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Saved words <span class="muted" id="wordcount"></span></h2>
+    <div id="words" class="muted scroll">Loading…</div>
+  </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const kb = n => n < 1024 * 1024 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB";
+
+// ---------- pairing ----------
+// The board answers the API only with a token, which pairing hands out (see /api/pair)
+let token = "";
+try { token = localStorage.getItem("token") || ""; } catch {}
+
+function api(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, { "X-Token": token });
+  return fetch(url, opts).then(r => {
+    if (r.status === 401) { showPair(); throw new Error("not paired"); }
+    return r;
+  });
+}
+
+function showPair() {
+  $("app").classList.add("hidden");
+  $("pair").classList.remove("hidden");
+  $("space").textContent = "";
+}
+
+$("showcode").onclick = async () => {
+  $("pairstatus").textContent = "";
+  const r = await fetch("/api/pair", { method: "POST" }).catch(() => null);
+  if (!r || !r.ok) { $("pairstatus").innerHTML = '<span class="err">The board didn\'t answer</span>'; return; }
+  const j = await r.json();
+  $("pairstatus").textContent = `Code on the board's screen (valid ${Math.round(j.seconds / 60)} min)`;
+  $("code").value = "";
+  $("code").focus();
+};
+
+async function verify() {
+  const code = $("code").value.replace(/\D/g, "");
+  if (code.length !== 6) { $("pairstatus").textContent = "Enter the 6 digits shown on the board"; return; }
+  const r = await fetch("/api/pair/verify?code=" + code, { method: "POST" }).catch(() => null);
+  const j = r ? await r.json().catch(() => ({})) : {};
+  if (!r || !r.ok) {
+    $("pairstatus").innerHTML = `<span class="err">${esc(j.error || "The board didn't answer")}` +
+      (j.triesLeft ? ` (${j.triesLeft} tries left)` : "") + "</span>";
+    return;
+  }
+  token = j.token;
+  try { localStorage.setItem("token", token); } catch {}
+  $("pair").classList.add("hidden");
+  $("pairstatus").textContent = "";
+  refresh();
+}
+$("verify").onclick = verify;
+$("code").onkeydown = e => { if (e.key === "Enter") verify(); };
+
+// ---------- device data ----------
+async function getJSON(url, opts) {
+  const r = await api(url, opts);
+  if (!r.ok) throw new Error(url + ": HTTP " + r.status);
+  return r.json();
+}
+
+async function loadInfo() {
+  const i = await getJSON("/api/info");
+  $("space").textContent = `${i.ip} · books: ${kb(i.total - i.free)} used, ${kb(i.free)} free`;
+}
+
+async function loadBooks() {
+  const books = await getJSON("/api/books");
+  if (!books.length) { $("books").innerHTML = "No books yet."; return; }
+  $("books").innerHTML = `<table><tr><th>Title</th><th class="num">Size</th><th class="num">Read</th><th></th></tr>` +
+    books.map(b => `<tr><td class="zh">${esc(b.title)}</td><td class="num">${kb(b.size)}</td>` +
+      `<td class="num">${b.progress}%</td>` +
+      `<td class="num"><button class="danger" data-id="${b.id}" data-title="${esc(b.title)}">Delete</button></td></tr>`).join("") +
+    `</table>`;
+  $("books").querySelectorAll("button").forEach(btn => btn.onclick = async () => {
+    if (!confirm(`Delete "${btn.dataset.title}" from the device?`)) return;
+    btn.disabled = true;
+    await api("/api/books?id=" + btn.dataset.id, { method: "DELETE" }).catch(() => {});
+    refresh();
+  });
+}
+
+async function loadWords() {
+  const words = await getJSON("/api/words");
+  $("wordcount").textContent = words.length ? `(${words.length})` : "";
+  if (!words.length) { $("words").innerHTML = "No saved words yet. Press the wheel on a word in a story to save it."; return; }
+  $("words").innerHTML = `<table><tr><th>Word</th><th>Pinyin</th><th>Meaning</th><th class="num">Saved</th></tr>` +
+    words.map(w => `<tr><td class="zh">${esc(w.w)}</td><td>${esc(w.p)}</td><td>${esc(w.d)}</td>` +
+      `<td class="num muted">${esc(w.day)}</td></tr>`).join("") + `</table>`;
+}
+
+function refresh() {
+  $("app").classList.remove("hidden");
+  loadInfo().catch(e => $("space").textContent = e.message);
+  loadBooks().catch(e => $("books").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+  loadWords().catch(e => $("words").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+}
+
+// ---------- conversion ----------
+// Characters the device's font can draw (see tools/make_font.py)
+const RANGES = [[0x20,0x7E],[0xA0,0x24F],[0x2010,0x2027],[0x3000,0x303F],[0x4E00,0x9FFF],[0xFF00,0xFFEF]];
+const SWAP = { "\u30FB":"\u00B7", "\u2032":"'", "\u2033":"\"", "\u2212":"-", "\u00A0":" ", "\t":" ",
+               "\u2028":"\n", "\u2029":"\n" };
+const fits = cp => RANGES.some(([a, b]) => cp >= a && cp <= b);
+const MARK = "\x1E";   // starts a chapter-title line (the device starts a new page there)
+
+function cleanText(text) {
+  let dropped = 0, out = "";
+  text = text.normalize("NFC").replace(/\r\n?/g, "\n").replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "");
+  for (const ch of text) {
+    const c = SWAP[ch] ?? ch;
+    if (c === "\n" || c === MARK || fits(c.codePointAt(0))) out += c; else dropped++;
+  }
+  const lines = out.split("\n").map(l => l.replace(/ {2,}/g, " ").replace(/^ +| +$/g, "").replace(/^\x1E +/, MARK))
+    .filter(l => l.length && l !== MARK);
+  return { text: lines.join("\n"), dropped };
+}
+
+// Chapter heading lines in plain text: 第十二章 / 第3回 / Chapter 12 / CHAPTER XII / 序章 ...
+const CHAPTER_LINE = /^\s*(第[0-9０-９零〇一二三四五六七八九十百千万两]+[章回节卷集部篇]|chapter\s+([0-9]+|[ivxlcdm]+)\b|(序章|楔子|引子|尾声|后记|番外))/i;
+function markTextChapters(text) {
+  return text.split(/\r?\n/).map(l => {
+    const t = l.trim();
+    return t && [...t].length <= 40 && CHAPTER_LINE.test(t) ? MARK + t + "\n" + l : l;
+  }).join("\n");
+}
+
+function decodeText(buf) {
+  let s;
+  try { s = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch { s = new TextDecoder("gb18030").decode(buf); }          // most non-UTF-8 Chinese .txt files
+  return s.replace(/^\uFEFF/, "");
+}
+
+// Text of an HTML/XHTML document, one line per block element. Chapter markers go before
+// elements whose id is in `anchors` (id -> title) and, with `headings`, before every h1/h2.
+const BLOCKS = new Set(["P","DIV","H1","H2","H3","H4","H5","H6","LI","BLOCKQUOTE","SECTION","ARTICLE","TR","PRE","DD","DT","HEADER","FOOTER","ASIDE","FIGCAPTION"]);
+function htmlText(doc, anchors = new Map(), headings = false) {
+  let out = "";
+  (function walk(n) {
+    if (n.nodeType === 3) { out += n.nodeValue.replace(/\s+/g, " "); return; }
+    if (n.nodeType !== 1) return;
+    const tag = n.tagName.toUpperCase();
+    if (tag === "SCRIPT" || tag === "STYLE" || tag === "HEAD") return;
+    const id = n.getAttribute("id");
+    if (id && anchors.has(id)) out += "\n" + MARK + anchors.get(id) + "\n";
+    else if (headings && (tag === "H1" || tag === "H2") && n.textContent.trim())
+      out += "\n" + MARK + n.textContent.replace(/\s+/g, " ").trim() + "\n";
+    if (tag === "BR") { out += "\n"; return; }
+    const block = BLOCKS.has(tag);
+    if (block) out += "\n";
+    for (const c of n.childNodes) walk(c);
+    if (block) out += "\n";
+  })(doc.body || doc.documentElement);
+  return out;
+}
+
+function parseMarkup(str) {
+  let doc = new DOMParser().parseFromString(str, "application/xhtml+xml");
+  if (doc.getElementsByTagName("parsererror").length) doc = new DOMParser().parseFromString(str, "text/html");
+  return doc;
+}
+
+// Minimal ZIP reader for EPUB: stored and deflated entries
+async function readZip(buf) {
+  const v = new DataView(buf), u8 = new Uint8Array(buf), files = {};
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) {
+    if (v.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("not a ZIP/EPUB file");
+  let p = v.getUint32(eocd + 16, true);
+  const count = v.getUint16(eocd + 10, true), dec = new TextDecoder();
+  for (let n = 0; n < count; n++) {
+    const method = v.getUint16(p + 10, true), csize = v.getUint32(p + 20, true);
+    const nlen = v.getUint16(p + 28, true), xlen = v.getUint16(p + 30, true), clen = v.getUint16(p + 32, true);
+    const local = v.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nlen));
+    files[name] = { method, csize, local };
+    p += 46 + nlen + xlen + clen;
+  }
+  return async function read(name) {
+    const f = files[name];
+    if (!f) return null;
+    const start = f.local + 30 + v.getUint16(f.local + 26, true) + v.getUint16(f.local + 28, true);
+    const data = u8.subarray(start, start + f.csize);
+    if (f.method === 0) return data;
+    if (f.method !== 8) throw new Error("unsupported compression in " + name);
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  };
+}
+
+function resolve(base, href) {
+  const parts = (base + decodeURIComponent(href.split("#")[0])).split("/"), out = [];
+  for (const s of parts) { if (s === "..") out.pop(); else if (s !== ".") out.push(s); }
+  return out.join("/");
+}
+
+// Table of contents as [{path, frag, title}], top-level entries (second level if there's only one)
+async function epubToc(read, opf, dir, dec) {
+  const entries = [];
+  const items = [...opf.getElementsByTagName("item")];
+  const ncxItem = items.find(i => i.getAttribute("media-type") === "application/x-dtbncx+xml");
+  const navItem = items.find(i => (i.getAttribute("properties") || "").split(/\s+/).includes("nav"));
+  const add = (base, href, title) => {
+    if (!href || !title) return;
+    const [file, frag = ""] = href.split("#");
+    entries.push({ path: resolve(base, file), frag: decodeURIComponent(frag), title: title.replace(/\s+/g, " ").trim() });
+  };
+  const levels = (top, childOf) => {        // the list to use: top level, or one down if it's a lone wrapper
+    let list = top;
+    if (list.length === 1 && childOf(list[0]).length > 1) list = childOf(list[0]);
+    return list;
+  };
+  if (navItem) {
+    const path = resolve(dir, navItem.getAttribute("href"));
+    const doc = parseMarkup(dec.decode(await read(path) || new Uint8Array()));
+    const base = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    const nav = [...doc.getElementsByTagName("nav")].find(n =>
+      (n.getAttribute("epub:type") || n.getAttributeNS("http://www.idpf.org/2007/ops", "type") || "").includes("toc"));
+    const ol = nav && nav.getElementsByTagName("ol")[0];
+    const lis = el => [...el.children].filter(c => c.tagName.toLowerCase() === "li");
+    const sub = li => { const o = [...li.children].find(c => c.tagName.toLowerCase() === "ol"); return o ? lis(o) : []; };
+    if (ol) for (const li of levels(lis(ol), sub)) {
+      const a = li.getElementsByTagName("a")[0];
+      if (a) add(base, a.getAttribute("href"), a.textContent);
+    }
+  }
+  if (!entries.length && ncxItem) {
+    const path = resolve(dir, ncxItem.getAttribute("href"));
+    const doc = new DOMParser().parseFromString(dec.decode(await read(path) || new Uint8Array()), "application/xml");
+    const base = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    const map = doc.getElementsByTagName("navMap")[0];
+    const points = el => [...el.children].filter(c => c.localName === "navPoint");
+    if (map) for (const np of levels(points(map), points)) {
+      const label = np.getElementsByTagName("text")[0], content = np.getElementsByTagName("content")[0];
+      if (label && content) add(base, content.getAttribute("src"), label.textContent);
+    }
+  }
+  return entries;
+}
+
+async function epubToText(buf) {
+  const read = await readZip(buf), dec = new TextDecoder();
+  const container = new DOMParser().parseFromString(dec.decode(await read("META-INF/container.xml")), "application/xml");
+  const opfPath = container.getElementsByTagName("rootfile")[0].getAttribute("full-path");
+  const opf = new DOMParser().parseFromString(dec.decode(await read(opfPath)), "application/xml");
+  const dir = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
+  const items = {};
+  for (const it of opf.getElementsByTagName("item")) items[it.getAttribute("id")] = it.getAttribute("href");
+  const titleEl = opf.getElementsByTagNameNS("*", "title")[0];
+  const toc = await epubToc(read, opf, dir, dec);
+  let text = "";
+  for (const ref of opf.getElementsByTagName("itemref")) {
+    const href = items[ref.getAttribute("idref")];
+    if (!href) continue;
+    const path = resolve(dir, href);
+    const bytes = await read(path);
+    if (!bytes) continue;
+    // Chapters in this file: one at its start (no #fragment), others at element ids
+    const here = toc.filter(e => e.path === path);
+    const anchors = new Map(here.filter(e => e.frag).map(e => [e.frag, e.title]));
+    const start = here.find(e => !e.frag);
+    if (start) text += MARK + start.title + "\n";
+    text += htmlText(parseMarkup(dec.decode(bytes)), anchors, toc.length === 0) + "\n";
+  }
+  return { title: titleEl ? titleEl.textContent.trim() : "", text };
+}
+
+let pending = null;   // { bytes, title }
+
+$("file").onchange = async () => {
+  const file = $("file").files[0];
+  if (!file) return;
+  $("converted").classList.add("hidden");
+  $("status").textContent = "";
+  $("progress").style.width = "0";
+  try {
+    const buf = await file.arrayBuffer(), lower = file.name.toLowerCase();
+    let title = file.name.replace(/\.[^.]+$/, ""), raw;
+    if (lower.endsWith(".epub")) {
+      const e = await epubToText(buf);
+      raw = e.text;
+      if (e.title) title = e.title;
+    } else if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+      raw = htmlText(parseMarkup(decodeText(buf)), new Map(), true);
+    } else {
+      raw = markTextChapters(decodeText(buf));
+    }
+    const { text, dropped } = cleanText(raw);
+    if (!text) throw new Error("no text found in that file");
+    $("title").value = title;
+    pending = { text };
+    const sample = new TextEncoder().encode(text).length;
+    const chapters = (text.match(/\x1E/g) || []).length;
+    $("stats").textContent = `${file.name}: ${kb(file.size)} → ${kb(sample)} of text, ${[...text].length.toLocaleString()} characters, ` +
+      `${chapters ? chapters + " chapters" : "no chapters found"}` +
+      (dropped ? `, ${dropped.toLocaleString()} unsupported characters removed` : "");
+    $("preview").textContent = text.slice(0, 600).replace(/\x1E/g, "\u00A7 ") + (text.length > 600 ? "…" : "");
+    $("converted").classList.remove("hidden");
+  } catch (e) {
+    $("stats").textContent = "";
+    alert("Couldn't convert that file: " + e.message);
+  }
+};
+
+// ---------- upload ----------
+const CHUNK = 32 * 1024;
+
+$("upload").onclick = async () => {
+  if (!pending) return;
+  const title = $("title").value.replace(/[\r\n]+/g, " ").trim() || "Untitled";
+  const bytes = new TextEncoder().encode(title + "\n" + pending.text);
+  const id = [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  $("upload").disabled = true;
+  let offset = 0, failures = 0;
+  try {
+    while (offset < bytes.length) {
+      const chunk = bytes.subarray(offset, Math.min(offset + CHUNK, bytes.length));
+      let r;
+      try {
+        r = await api(`/api/upload?id=${id}&offset=${offset}&total=${bytes.length}`, { method: "POST", body: chunk });
+      } catch (e) {
+        if (e.message === "not paired") throw e;
+        if (++failures > 5) throw new Error("the device stopped answering");
+        await new Promise(res => setTimeout(res, 1000 * failures));
+        continue;                                   // retry the same chunk
+      }
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 409) { offset = j.have || 0; continue; }   // out of step: resume where the device is
+      if (r.status === 507) throw new Error("not enough space on the device");
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      failures = 0;
+      offset = j.have;
+      $("progress").style.width = (100 * offset / bytes.length).toFixed(1) + "%";
+      $("status").textContent = `${kb(offset)} / ${kb(bytes.length)}`;
+    }
+    $("status").textContent = "Done";
+    pending = null;
+    $("file").value = "";
+    setTimeout(() => $("converted").classList.add("hidden"), 1500);
+    refresh();
+  } catch (e) {
+    $("status").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("upload").disabled = false;
+  }
+};
+
+if (token) refresh(); else showPair();
+</script>
+</body>
+</html>

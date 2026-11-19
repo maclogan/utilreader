@@ -1,0 +1,22 @@
+# Elecrow CrowPanel ESP32 E-Paper 2.13": ESP32-S3-WROOM-1-N8R8 (8 MB quad flash, 8 MB octal PSRAM)
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Partition table: 4 MB app + 1 MB storage (see partitions.csv)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM (octal on the N8R8 module)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Bigger main task stack (comfortable headroom for drawing + JSON)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Weather display timing
+CONFIG_WEATHER_PARTIAL_SECONDS=300
+CONFIG_WEATHER_REFRESH_MINUTES=60

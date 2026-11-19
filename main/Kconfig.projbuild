@@ -1,0 +1,110 @@
+# Adds a "Weather Display" menu to `idf.py menuconfig`.
+# Values chosen here end up in sdkconfig and are available in C as CONFIG_<NAME>.
+
+menu "Weather Display"
+
+    config WEATHER_WIFI_SSID
+        string "Wi-Fi network name (SSID)"
+        default ""
+        help
+            Name of the 2.4 GHz Wi-Fi network to join. The ESP32-S3 cannot use 5 GHz.
+
+    config WEATHER_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            Password for the network above. Leave empty for an open network.
+
+    config WEATHER_LATITUDE
+        string "Latitude"
+        default "40.7128"
+        help
+            Decimal latitude of the forecast location (north is positive).
+
+    config WEATHER_LONGITUDE
+        string "Longitude"
+        default "-74.0060"
+        help
+            Decimal longitude of the forecast location (east is positive, west is negative).
+
+    choice WEATHER_UNITS
+        prompt "Units"
+        default WEATHER_UNITS_IMPERIAL
+
+        config WEATHER_UNITS_IMPERIAL
+            bool "Fahrenheit / mph"
+
+        config WEATHER_UNITS_METRIC
+            bool "Celsius / km/h"
+    endchoice
+
+    config WEATHER_REFRESH_MINUTES
+        int "Minutes between full refreshes"
+        range 5 1440
+        default 60
+        help
+            How often the whole forecast is re-downloaded and the screen gets a
+            full (flashing) refresh, which also clears partial-refresh ghosting.
+
+    config WEATHER_PARTIAL_SECONDS
+        int "Seconds between partial refreshes"
+        range 5 3600
+        default 300
+        help
+            How often the current-conditions area is redrawn with a quick partial
+            refresh (no flashing). The board stays awake and online to do this.
+
+endmenu
+
+menu "Chinese Story"
+
+    config STORY_API_KEY
+        string "Claude API key"
+        default ""
+        help
+            Anthropic API key (from platform.claude.com) used to write the daily story.
+            Stored in plain text in sdkconfig and the firmware, so don't share either.
+
+    config STORY_MODEL
+        string "Claude model"
+        default "claude-opus-5-5"
+        help
+            Model that writes the story. One request per day.
+
+    config STORY_HSK_LEVEL
+        int "Reader level (HSK 1-6)"
+        range 1 6
+        default 3
+        help
+            Vocabulary the story may assume you know, on top of the words earlier
+            stories introduced.
+
+    config STORY_RESET_HOUR
+        int "Hour a new story starts (0-23, local time)"
+        range 0 23
+        default 3
+        help
+            The story changes at this hour each night. The board writes the next
+            story shortly after, so it's ready in the morning.
+
+endmenu
+
+menu "Hardware"
+
+    config DISPLAY_ROTATE_180
+        bool "Rotate the display 180 degrees"
+        default n
+        help
+            The default matches Elecrow's examples for the CrowPanel 2.13". Turn this on
+            if everything appears upside down on your unit.
+
+    config DISPLAY_DIAGNOSTIC
+        bool "Run the display wiring diagnostic at every boot"
+        default n
+        help
+            Before starting, test the display pins (pull-up/down survey, shorts between
+            pins, whether the panel responds to reset and commands) and log a report under
+            the tag "epd_diag". Adds about 20 s to start-up. Use it when bringing up new
+            wiring; see components/display/README.md.
+
+endmenu
