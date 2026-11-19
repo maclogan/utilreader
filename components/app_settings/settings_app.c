@@ -202,7 +202,7 @@ static void draw(bool full)
     }
 }
 
-static void settings_open(void)
+static void settings_open(const app_t *self)
 {
     row = ROW_DATE;
     editing = -1;
@@ -284,13 +284,13 @@ static bool button_editing(button_event_t event)
     return true;
 }
 
-static bool settings_button(button_event_t event)
+static bool settings_button(const app_t *self, button_event_t event)
 {
     return editing >= 0 ? button_editing(event) : button_choosing(event);
 }
 
 // The time on screen changes every minute while choosing a row
-static TickType_t settings_next_wakeup(void)
+static TickType_t settings_next_wakeup(const app_t *self)
 {
     if (editing >= 0 || !local_time_synced()) {
         return portMAX_DELAY;
@@ -298,7 +298,7 @@ static TickType_t settings_next_wakeup(void)
     return pdMS_TO_TICKS((60 - time(NULL) % 60) * 1000 + 200);
 }
 
-static void settings_tick(void)
+static void settings_tick(const app_t *self)
 {
     if (editing < 0 && (long)(time(NULL) / 60) != drawn_minute) {  // also called early: check
         draw(false);
@@ -306,7 +306,7 @@ static void settings_tick(void)
 }
 
 // Menu icon: a gear (a ring with eight teeth)
-static void settings_icon(int cx, int cy)
+static void settings_icon(const app_t *self, int cx, int cy)
 {
     static const int teeth[8][2] = {{0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}};
     for (int i = 0; i < 8; i++) {
@@ -319,6 +319,7 @@ static void settings_icon(int cx, int cy)
 }
 
 const app_t settings_app = {
+    .id = "settings",
     .name = "Settings",
     .draw_icon = settings_icon,
     .open = settings_open,

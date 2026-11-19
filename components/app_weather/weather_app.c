@@ -117,13 +117,13 @@ static void show_forecast(void)
 
 // ---------- app callbacks ----------
 
-static void weather_open(void)
+static void weather_open(const app_t *self)
 {
     hover = -1;                                             // no day highlighted when the app opens
     show_forecast();
 }
 
-static bool weather_button(button_event_t event)
+static bool weather_button(const app_t *self, button_event_t event)
 {
     if (event == BUTTON_BACK) {
         if (!in_day) {
@@ -166,13 +166,13 @@ static bool weather_button(button_event_t event)
     return true;
 }
 
-static TickType_t weather_next_wakeup(void)
+static TickType_t weather_next_wakeup(const app_t *self)
 {
     return in_day ? portMAX_DELAY : app_ticks_until(next_redraw);
 }
 
 // Scheduled update while the forecast is on screen
-static void weather_tick(void)
+static void weather_tick(const app_t *self)
 {
     if (in_day || !app_due(next_redraw)) {
         return;
@@ -190,7 +190,7 @@ static void weather_tick(void)
 }
 
 // Even when not on screen: keep trying until there's a forecast (other apps need the time zone)
-static void weather_background(void)
+static void weather_background(const app_t *self)
 {
     if (!have_forecast && !worker_pending(download_job)
         && (!requested || app_due(last_fetch + FIRST_RETRY_TICKS))) {
@@ -198,9 +198,16 @@ static void weather_background(void)
     }
 }
 
+// Menu icon (the drawing lives with the app's other screens)
+static void app_icon(const app_t *self, int cx, int cy)
+{
+    weather_ui_draw_app_icon(cx, cy);
+}
+
 const app_t weather_app = {
+    .id = "weather",
     .name = "Weather",
-    .draw_icon = weather_ui_draw_app_icon,
+    .draw_icon = app_icon,
     .open = weather_open,
     .button = weather_button,
     .next_wakeup = weather_next_wakeup,

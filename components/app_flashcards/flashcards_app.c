@@ -116,7 +116,7 @@ static void answer(bool correct)
 
 // ---------- app callbacks ----------
 
-static void flashcards_open(void)
+static void flashcards_open(const app_t *self)
 {
     today = deck_today();
     if (today < 0) {
@@ -132,7 +132,7 @@ static void flashcards_open(void)
     }
 }
 
-static bool flashcards_button(button_event_t event)
+static bool flashcards_button(const app_t *self, button_event_t event)
 {
     if (event == BUTTON_BACK) {
         return false;                                       // leave (progress is already saved)
@@ -154,9 +154,16 @@ static bool flashcards_button(button_event_t event)
     return true;
 }
 
+// Menu icon (the drawing lives with the app's other screens)
+static void app_icon(const app_t *self, int cx, int cy)
+{
+    flashcards_ui_draw_app_icon(cx, cy);
+}
+
 const app_t flashcards_app = {
+    .id = "cards",
     .name = "Cards",
-    .draw_icon = flashcards_ui_draw_app_icon,
+    .draw_icon = app_icon,
     .open = flashcards_open,
     .button = flashcards_button,
 };

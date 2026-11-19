@@ -113,7 +113,7 @@ static void draw_tile(int x, int y, const app_t *item, bool highlighted)
         text_centered(cx, label_y + 3, item->name, 1, EPD_BLACK);
     }
 
-    item->draw_icon(cx, y + (TILE_H - LABEL_H) / 2 + 1);    // icon centered in the space above the label
+    item->draw_icon(item, cx, y + (TILE_H - LABEL_H) / 2 + 1);    // icon centered in the space above the label
 }
 
 void menu_ui_show(const app_t *const apps[], int count, int selected, bool full)

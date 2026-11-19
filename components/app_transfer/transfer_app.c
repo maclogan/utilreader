@@ -98,13 +98,13 @@ static void draw(bool full)
     }
 }
 
-static void transfer_open(void)
+static void transfer_open(const app_t *self)
 {
     webui_start();
     draw(true);
 }
 
-static bool transfer_button(button_event_t event)
+static bool transfer_button(const app_t *self, button_event_t event)
 {
     if (event == BUTTON_BACK) {
         webui_status_t st;
@@ -128,12 +128,12 @@ static bool transfer_button(button_event_t event)
     return true;
 }
 
-static TickType_t transfer_next_wakeup(void)
+static TickType_t transfer_next_wakeup(const app_t *self)
 {
     return shown.code_live ? pdMS_TO_TICKS(1000) : portMAX_DELAY;   // notice the code expiring
 }
 
-static void transfer_tick(void)
+static void transfer_tick(const app_t *self)
 {
     webui_status_t st;
     webui_status(&st);
@@ -144,20 +144,20 @@ static void transfer_tick(void)
     }
 }
 
-static void transfer_background(void)
+static void transfer_background(const app_t *self)
 {
     if (app_is_showing(&transfer_app)) {
-        transfer_tick();                                    // every ~30 s: catch Wi-Fi changes
+        transfer_tick(self);                                // every ~30 s: catch Wi-Fi changes
     }
 }
 
-static void transfer_close(void)
+static void transfer_close(const app_t *self)
 {
     webui_stop();
 }
 
 // Menu icon: two arrows, up and down
-static void transfer_icon(int cx, int cy)
+static void transfer_icon(const app_t *self, int cx, int cy)
 {
     for (int i = 0; i < 2; i++) {
         int x = cx - 7 + i * 14;
@@ -170,6 +170,7 @@ static void transfer_icon(int cx, int cy)
 }
 
 const app_t transfer_app = {
+    .id = "transfer",
     .name = "Transfer",
     .draw_icon = transfer_icon,
     .open = transfer_open,

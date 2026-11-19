@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>                     // strtoul(), free()
 #include <string.h>
+#include "app_script.h"                 // installing script apps
 #include "books.h"                      // book files
 #include "buttons.h"                    // buttons_post(BUTTON_WAKE): tell the main loop to redraw
 #include "cJSON.h"                      // JSON responses
@@ -144,6 +145,38 @@ static bool query(httpd_req_t *req, const char *key, char *out, size_t size)
         && httpd_query_key_value(q, key, out, size) == ESP_OK;
 }
 
+// Reads the whole request body (at most CHUNK_MAX bytes) into a new PSRAM buffer.
+// Returns ESP_OK and fills *out/*len, or sends an error response and returns its result
+// (ESP_FAIL if the connection dropped: nothing more can be sent then).
+static esp_err_t recv_body(httpd_req_t *req, char **out, int *len_out)
+{
+    int len = req->content_len;
+    if (len <= 0 || len > CHUNK_MAX) {
+        send_error(req, "400 Bad Request", "chunk too big");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    char *buf = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (buf == NULL) {
+        send_error(req, "500 Internal Server Error", "out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+    int got = 0;
+    while (got < len) {
+        int r = httpd_req_recv(req, buf + got, len - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;                                       // slow network: keep waiting
+        }
+        if (r <= 0) {
+            free(buf);
+            return ESP_FAIL;                                // connection dropped; the page retries
+        }
+        got += r;
+    }
+    *out = buf;
+    *len_out = len;
+    return ESP_OK;
+}
+
 // ---------- handlers ----------
 
 static esp_err_t page_get(httpd_req_t *req)
@@ -236,26 +269,11 @@ static esp_err_t upload_post(httpd_req_t *req)
         return send_error(req, "400 Bad Request", "missing total");
     }
     total = strtoul(num, NULL, 10);
-    int len = req->content_len;
-    if (len <= 0 || len > CHUNK_MAX) {
-        return send_error(req, "400 Bad Request", "chunk too big");
-    }
-
-    char *buf = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-    if (buf == NULL) {
-        return send_error(req, "500 Internal Server Error", "out of memory");
-    }
-    int got = 0;
-    while (got < len) {
-        int r = httpd_req_recv(req, buf + got, len - got);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;                                       // slow network: keep waiting
-        }
-        if (r <= 0) {
-            free(buf);
-            return ESP_FAIL;                                // connection dropped; the page retries
-        }
-        got += r;
+    char *buf;
+    int len;
+    esp_err_t got = recv_body(req, &buf, &len);
+    if (got != ESP_OK) {
+        return got == ESP_FAIL ? ESP_FAIL : ESP_OK;         // error already sent (or connection gone)
     }
 
     uint32_t have = 0;
@@ -310,6 +328,133 @@ static esp_err_t words_get(httpd_req_t *req)
     }
     free(words);
     return send_json(req, arr, NULL);
+}
+
+// ---------- script apps ----------
+
+// GET /api/apps: installed script apps
+static esp_err_t apps_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    return send_json(req, app_script_list_json(), NULL);
+}
+
+// POST /api/apps/upload?id=clock&file=main.lua&offset=N&total=T[&new=1], body = the next
+// chunk of that file. new=1 on the first chunk of a package starts a fresh upload.
+static esp_err_t apps_upload_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32], file[40], num[16], fresh[4] = "";
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    if (!query(req, "file", file, sizeof(file))) {
+        return send_error(req, "400 Bad Request", "missing file");
+    }
+    if (!query(req, "offset", num, sizeof(num))) {
+        return send_error(req, "400 Bad Request", "missing offset");
+    }
+    uint32_t offset = strtoul(num, NULL, 10);
+    if (!query(req, "total", num, sizeof(num))) {
+        return send_error(req, "400 Bad Request", "missing total");
+    }
+    uint32_t total = strtoul(num, NULL, 10);
+    query(req, "new", fresh, sizeof(fresh));
+
+    char *buf;
+    int len;
+    esp_err_t got = recv_body(req, &buf, &len);
+    if (got != ESP_OK) {
+        return got == ESP_FAIL ? ESP_FAIL : ESP_OK;
+    }
+    uint32_t have = 0;
+    esp_err_t err = app_script_stage(id, file, offset, total, buf, len, strcmp(fresh, "1") == 0, &have);
+    free(buf);
+
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddNumberToObject(j, "have", have);
+    switch (err) {
+    case ESP_OK:
+        return send_json(req, j, NULL);
+    case ESP_ERR_INVALID_STATE:
+        return send_json(req, j, "409 Conflict");          // the page resumes from "have"
+    case ESP_ERR_NO_MEM:
+        cJSON_AddStringToObject(j, "error", "not enough space for apps");
+        return send_json(req, j, "507 Insufficient Storage");
+    default:
+        cJSON_AddStringToObject(j, "error", "bad file name, size or id");
+        return send_json(req, j, "400 Bad Request");
+    }
+}
+
+// POST /api/apps/install?id=clock: install the uploaded package
+static esp_err_t apps_install_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32], err[96];
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    if (app_script_install(id, err, sizeof(err)) != ESP_OK) {
+        return send_error(req, "400 Bad Request", err);
+    }
+    char text[sizeof(activity)];
+    snprintf(text, sizeof(text), "Installed app: %s", id);
+    set_activity(text, -1);
+    buttons_post(BUTTON_APPS_CHANGED);                      // the main loop reloads the app list
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "installed", true);
+    return send_json(req, j, NULL);
+}
+
+// DELETE /api/apps?id=clock: remove an app with its settings and data
+static esp_err_t apps_delete(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32];
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    esp_err_t err = app_script_uninstall(id);
+    if (err == ESP_OK) {
+        char text[sizeof(activity)];
+        snprintf(text, sizeof(text), "Removed app: %s", id);
+        set_activity(text, -1);
+        buttons_post(BUTTON_APPS_CHANGED);
+    }
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddBoolToObject(j, "deleted", err == ESP_OK);
+    return send_json(req, j, err == ESP_OK ? NULL : "404 Not Found");
+}
+
+// GET /api/apps/log?id=clock: the app's recent log lines (print(), errors)
+static esp_err_t apps_log_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[32];
+    if (!query(req, "id", id, sizeof(id)) || !app_script_valid_id(id)) {
+        return send_error(req, "400 Bad Request", "missing or bad app id");
+    }
+    char *text = heap_caps_malloc(2100, MALLOC_CAP_SPIRAM);
+    if (text == NULL) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    app_script_log_read(id, text, 2100);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t e = httpd_resp_sendstr(req, text);
+    free(text);
+    return e;
 }
 
 // POST /api/pair: show a code on the board's screen (the same one again if still valid)
@@ -388,7 +533,7 @@ esp_err_t webui_start(void)
     upload_percent = -1;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 10;
+    cfg.max_uri_handlers = 16;
     cfg.lru_purge_enable = true;                            // drop idle connections when busy
     cfg.recv_wait_timeout = 15;                             // seconds per upload read
 
@@ -405,6 +550,11 @@ esp_err_t webui_start(void)
         {.uri = "/api/books",   .method = HTTP_DELETE, .handler = books_delete_handler},
         {.uri = "/api/upload",  .method = HTTP_POST,   .handler = upload_post},
         {.uri = "/api/words",   .method = HTTP_GET,    .handler = words_get},
+        {.uri = "/api/apps",    .method = HTTP_GET,    .handler = apps_get},
+        {.uri = "/api/apps",    .method = HTTP_DELETE, .handler = apps_delete},
+        {.uri = "/api/apps/upload",  .method = HTTP_POST, .handler = apps_upload_post},
+        {.uri = "/api/apps/install", .method = HTTP_POST, .handler = apps_install_post},
+        {.uri = "/api/apps/log",     .method = HTTP_GET,  .handler = apps_log_get},
         {.uri = "/api/pair",    .method = HTTP_POST,   .handler = pair_post},
         {.uri = "/api/pair/verify", .method = HTTP_POST, .handler = pair_verify_post},
     };

@@ -1,0 +1,11 @@
+{
+  "id": "clock",
+  "name": "Clock",
+  "version": "1.0.0",
+  "api": 1,
+  "author": "maclogan",
+  "description": "The local time in big digits, redrawn every minute.",
+  "settings": [
+    {"key": "h24", "label": "24-hour clock", "type": "bool", "default": false}
+  ]
+}

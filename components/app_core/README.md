@@ -3,6 +3,7 @@
 | File | Provides |
 |---|---|
 | `include/app.h`, `app.c` | `app_t`, the interface every app implements, plus small timing helpers |
+| `include/app_registry.h`, `app_registry.c` | The list of apps on the menu (native and script), in menu order |
 | `include/worker.h`, `worker.c` | Background task for slow (network) work |
 | `include/settings.h`, `settings.c` | Small values remembered across power-offs (NVS) |
 | `include/storage.h`, `storage.c` | The `/store` file system (SPIFFS on the `storage` partition) |
@@ -11,18 +12,33 @@
 ## `app_t`: the app interface
 
 ```c
-typedef struct app {
+struct app {
+    const char *id;                           // stable id, remembered as the last app
     const char *name;                         // menu tile label
-    void (*draw_icon)(int cx, int cy);        // menu tile icon (~32x32 px around cx, cy)
-    void (*init)(void);                       // optional: once at power-on
-    void (*open)(void);                       // opened from the menu: draw (full refresh)
-    bool (*button)(button_event_t event);     // false = leave the app
-    TickType_t (*next_wakeup)(void);          // optional: ticks until tick() is wanted
-    void (*tick)(void);                       // optional: scheduled work while on screen
-    void (*background)(void);                 // optional: every ~30 s, on screen or not
-    void (*close)(void);                      // optional: the app is leaving the screen
-} app_t;
+    void (*draw_icon)(const app_t *self, int cx, int cy);  // menu tile icon (~32x32 px)
+    void (*init)(const app_t *self);          // optional: once at power-on (or install)
+    void (*open)(const app_t *self);          // opened from the menu: draw (full refresh)
+    bool (*button)(const app_t *self, button_event_t event);  // false = leave the app
+    TickType_t (*next_wakeup)(const app_t *self);  // optional: ticks until tick() is wanted
+    void (*tick)(const app_t *self);          // optional: scheduled work while on screen
+    void (*background)(const app_t *self);    // optional: every ~30 s, on screen or not
+    void (*close)(const app_t *self);         // optional: the app is leaving the screen
+    bool no_resume;                           // never reopened by itself at power-on
+    void *ctx;                                // for the implementation
+};
 ```
+
+Every callback gets the app itself, so one implementation can serve many apps: the Lua
+host (`components/app_script`) gives every installed script app an `app_t` with the same
+callbacks and finds its state through `self->ctx`. Native apps ignore `self`.
+
+## The app registry
+
+`app_registry_add(app, system)` puts an app on the menu: regular apps in the order added,
+system apps (`true`: Transfer, Settings, Power) always at the end. `app_registry_list()`
+returns them in menu order; `app_registry_find(id)` finds one. `main.c` adds the native
+apps; the script host adds and removes script apps (on start-up, and after an install
+through the portal). Main task only.
 
 ### Lifecycle
 
@@ -105,7 +121,7 @@ settings_set_i32("hsk_level", 4);                    // skips the write if uncha
 ```
 
 Stored in the NVS partition, namespace `"app"`. Keys are at most 15 characters and shared
-by all apps, so prefix them if they might clash. Keys in use: `last_app`, `on_menu` (main),
+by all apps, so prefix them if they might clash. Keys in use: `last_app_id` (string), `on_menu` (main), `apps_seeded` (app_script),
 `utc_off` (local_time), `rotate180` (Settings app, applied by main), `hsk_level` (story), `bk<book ID>`, `bo<book ID>`, `book_seq` (reading positions, last opened; books). Good for small values that change rarely;
 use files for anything larger.
 

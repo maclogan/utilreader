@@ -5,7 +5,7 @@ exist; it knows nothing about what happens inside them.
 
 | File | What it does |
 |---|---|
-| `main.c` | Start-up sequence, the `apps[]` list, the event loop |
+| `main.c` | Start-up sequence, registering the native apps, the event loop |
 | `menu_ui.c/.h` | Draws the row of app tiles (scrolls when there are more than 4) |
 | `Kconfig.projbuild` | The *Weather Display* and *Chinese Story* menus in `idf.py menuconfig` |
 | `CMakeLists.txt` | Which components the launcher uses |
@@ -28,7 +28,7 @@ exist; it knows nothing about what happens inside them.
    isn't set yet.
 7. Every app's `background()` once, so downloads start immediately (the weather app
    fetches the forecast, which also provides the time zone).
-8. Back to where it was: the app in the `last_app` setting, or the menu if `on_menu` is
+8. Back to where it was: the app whose id is in the `last_app_id` setting, or the menu if `on_menu` is
    set (a new board starts on the menu). Apps with `no_resume` set (Transfer, Power) are
    never reopened automatically, so the web server only runs when opened on purpose.
 
@@ -90,9 +90,9 @@ presses made meanwhile queue up (up to 8) and are handled right after.
    #include "notes_app.h"
    #include "epd.h"
 
-   static void notes_icon(int cx, int cy) { epd_fill_circle(cx, cy, 10, EPD_BLACK); }
+   static void notes_icon(const app_t *self, int cx, int cy) { epd_fill_circle(cx, cy, 10, EPD_BLACK); }
 
-   static void notes_open(void)
+   static void notes_open(const app_t *self)
    {
        epd_init();                                 // full refresh for the first screen
        epd_clear(EPD_WHITE);
@@ -100,12 +100,13 @@ presses made meanwhile queue up (up to 8) and are handled right after.
        epd_display();
    }
 
-   static bool notes_button(button_event_t e)
+   static bool notes_button(const app_t *self, button_event_t e)
    {
        return e != BUTTON_BACK;                    // BACK leaves; nothing else to do yet
    }
 
    const app_t notes_app = {
+       .id = "notes",                              // stable: remembered as the last app
        .name = "Notes",
        .draw_icon = notes_icon,
        .open = notes_open,
@@ -115,10 +116,15 @@ presses made meanwhile queue up (up to 8) and are handled right after.
 
 3. **Register it** in two places:
    - `main/CMakeLists.txt`: add `app_notes` to `PRIV_REQUIRES`.
-   - `main/main.c`: `#include "notes_app.h"` and add `&notes_app` to `apps[]`.
+   - `main/main.c`: `#include "notes_app.h"` and `app_registry_add(&notes_app, false);` in
+     `register_apps()`.
 
-Order in `apps[]` is menu order. The `last_app` setting stores an index into `apps[]`,
-so reordering the list makes the board open a different app at the next power-on (once).
+The order of `register_apps()` is the menu order; script apps follow the native ones
+(alphabetically), and the system apps (`true`: Transfer, Settings, Power) stay last. The
+app to reopen at power-on is remembered by `id`, so the order can change freely.
+
+Apps don't have to be compiled in: a Lua app installed from the web page appears in the
+menu straight away. See [docs/api.md](../docs/api.md) and `components/app_script`.
 
 ## Menu layout (`menu_ui.c`)
 

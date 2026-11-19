@@ -5,6 +5,7 @@ phy_init, data, phy,     0xf000,  0x1000
 factory,  app,  factory, 0x10000, 4M
 # Files for the story app: today's story, words already introduced, saved review words
 storage,  data, spiffs,  ,        1M
-# E-books (FAT with wear levelling), uploaded through the web interface. Fills the rest of
-# the 16 MB flash: 0x510000 - 0x1000000.
-books,    data, fat,     ,        0xAF0000
+# E-books (FAT with wear levelling), uploaded through the web interface: 0x510000 - 0xE00000
+books,    data, fat,     ,        0x8F0000
+# Script apps installed through the web interface (FAT), the rest of the 16 MB flash
+apps,     data, fat,     ,        0x200000

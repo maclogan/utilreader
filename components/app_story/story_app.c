@@ -236,13 +236,13 @@ static void saved_button(button_event_t event)
 
 // ---------- app callbacks ----------
 
-static void story_open(void)
+static void story_open(const app_t *self)
 {
     view = VIEW_MENU;
     draw_menu(true);
 }
 
-static bool story_button(button_event_t event)
+static bool story_button(const app_t *self, button_event_t event)
 {
     if (event == BUTTON_BACK) {
         if (view == VIEW_MENU) {
@@ -315,7 +315,7 @@ static void story_job_done(void *result, void *arg)
 }
 
 // Even when not on screen: write the next story once the story day rolls over
-static void story_background(void)
+static void story_background(const app_t *self)
 {
     if (local_time_offset_known()                           // need the time zone to know the date
         && can_write()
@@ -327,10 +327,22 @@ static void story_background(void)
     }
 }
 
+// Menu icon (the drawing lives with the app's other screens)
+static void app_icon(const app_t *self, int cx, int cy)
+{
+    story_ui_draw_app_icon(cx, cy);
+}
+
+static void app_init(const app_t *self)
+{
+    story_init();
+}
+
 const app_t story_app = {
+    .id = "story",
     .name = "Story",
-    .draw_icon = story_ui_draw_app_icon,
-    .init = story_init,
+    .draw_icon = app_icon,
+    .init = app_init,
     .open = story_open,
     .button = story_button,
     .background = story_background,

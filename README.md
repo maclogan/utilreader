@@ -8,13 +8,17 @@ switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 | App | What it does |
 |---|---|
 | **Weather** | 7-day forecast from [Open-Meteo](https://open-meteo.com) (free, no key), with a details screen per day |
-| **Clock** | Local time in big digits, redrawn every minute |
+| **Clock** | Local time in big digits, redrawn every minute (a Lua app: the example for writing your own) |
 | **Story** | A short Chinese graded-reader story written by Claude each day, with per-word pinyin and meaning lookup and a saved-words list |
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
 | **Books** | E-book reader: chapters, reading position and progress kept per book |
 | **Transfer** | While open, a web page on your Wi-Fi to add/delete books and see saved words |
 | **Settings** | Set the date and time by hand; turn the screen upside down |
 | **Power** | Turns the device off (hold BACK / HOME to turn it on again) |
+
+**Your own apps.** Apps can also be small Lua programs installed from the web page
+(**Transfer** → **Apps**), with no rebuilding: see [docs/api.md](docs/api.md). Clock is one,
+built in; it can be removed and reinstalled like any other.
 
 At power-on the board returns to where it was: the last app, or the main menu if that's
 where you left it (Transfer and Power are never reopened automatically).
@@ -108,16 +112,21 @@ table).
 | phy_init | 4 KB | Radio calibration |
 | factory | 4 MB | The firmware (about 1.8 MB, mostly the 700 KB Chinese font) |
 | storage | 1 MB | SPIFFS files at `/store`: today's story, known words, saved words, flashcard progress |
-| books | 10.9 MB | FAT at `/books`: e-books, their page indexes and chapter lists |
+| books | 8.9 MB | FAT at `/books`: e-books, their page indexes and chapter lists |
+| apps | 2 MB | FAT at `/apps`: installed Lua apps, their settings and data |
 
 ## How the code is organised
 
 ```
 HARDWARE.md               parts, wiring, pinout, power
+docs/api.md               writing Lua apps
+apps/                     Lua apps bundled with the firmware (Clock)
 main/                     the launcher: start-up, main menu, event loop      (main/README.md)
 components/
-  app_core/               what apps are built on: app_t interface, worker,
-                          settings, file storage, local time               (README inside)
+  app_core/               what apps are built on: app_t interface, app registry,
+                          worker, settings, file storage, local time       (README inside)
+  app_script/             Lua apps: host, API, installing, bundled apps
+  lua/                    Lua 5.4.7 interpreter (unmodified)
   display/                e-paper driver (SSD16xx), 16 px Unicode font, loading box,
                           left title bar, wiring diagnostic; owns the peripheral rail
   buttons/                5-way switch + BACK/HOME + lock switch -> tap / hold events
@@ -130,7 +139,6 @@ components/
   net/                    Wi-Fi connection
   review/                 saved review words (shared by the story and flashcard apps)
   app_weather/            Weather app
-  app_clock/              Clock app
   app_story/              Story app
   app_flashcards/         Flashcards (Cards) app
   app_reader/             Books (e-reader) app
@@ -150,7 +158,7 @@ depends on, so the build enforces this.
                                        |
        +---------------+---------------+---------------+
        |               |               |               |
-  app_weather      app_clock       app_story     app_flashcards
+  app_weather      app_script      app_story     app_flashcards
        |               |               |   \           /   |
        |               |               |    +- review -+   |
        +---------------+---------------+-------+-----------+
@@ -176,7 +184,8 @@ depends on, so the build enforces this.
 
 See [main/README.md](main/README.md#adding-an-app). In short: create
 `components/app_<name>/` exporting an `app_t`, add it to `PRIV_REQUIRES` in
-`main/CMakeLists.txt`, and add it to the `apps[]` list in `main/main.c`. The menu scrolls
+`main/CMakeLists.txt`, and add it in `register_apps()` in `main/main.c`. Or write it in
+Lua and install it from the web page: [docs/api.md](docs/api.md). The menu scrolls
 when there are more than four apps.
 
 ## Troubleshooting

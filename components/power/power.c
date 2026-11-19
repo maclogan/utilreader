@@ -24,7 +24,7 @@ static void draw_power_symbol(int cx, int cy, int r, int thickness)
     epd_draw_rect(cx - thickness / 2, cy - r - 2, thickness, r + 2, EPD_BLACK, true);
 }
 
-static void power_icon(int cx, int cy)
+static void power_icon(const app_t *self, int cx, int cy)
 {
     draw_power_symbol(cx, cy, 13, 3);
 }
@@ -77,17 +77,18 @@ void power_off(void)
     esp_deep_sleep_start();
 }
 
-static void power_open(void)
+static void power_open(const app_t *self)
 {
     power_off();
 }
 
-static bool power_button(button_event_t event)
+static bool power_button(const app_t *self, button_event_t event)
 {
     return false;                                           // never reached: power_off() doesn't return
 }
 
 const app_t power_app = {
+    .id = "power",
     .name = "Power",
     .draw_icon = power_icon,
     .open = power_open,

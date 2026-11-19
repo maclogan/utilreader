@@ -1,14 +1,15 @@
 /*
  * E-paper app launcher: start-up, the main menu, and the event loop that drives the apps.
  *
- * Every app implements app_t (components/app_core/include/app.h). This file:
+ * Every app implements app_t (components/app_core/include/app.h) and is listed in the app
+ * registry (app_registry.h): native apps are added in register_apps() below, script apps
+ * (Lua, installed through the web portal) by components/app_script. This file:
  *   - starts everything (storage, Wi-Fi, internet time, the worker, each app's init)
  *   - shows the menu of apps and opens the chosen one (and, at power-on, the last one used)
  *   - waits for buttons, scheduled wake-ups and finished downloads, and passes them on
  *
  * Controls anywhere: holding BACK = home (this menu); everything else goes to the app.
  * The lock switch silences every control; the Power tile turns the device off (power.h).
- * To add an app, write a component that exports an app_t and list it in `apps` below.
  * See main/README.md.
  */
 #include <stdbool.h>
@@ -16,10 +17,11 @@
 #include <string.h>                     // strlen(), strcmp()
 #include <sys/time.h>                   // struct timeval (SNTP callback)
 #include "app.h"                        // app_t
+#include "app_registry.h"               // the apps on the menu
+#include "app_script.h"                 // script apps
 #include "battery.h"                    // onboard fuel gauge
 #include "books.h"                      // books_init()
 #include "buttons.h"                    // buttons_init(), buttons_wait()
-#include "clock_app.h"
 #include "epd.h"                  // halt() screen
 #include "esp_log.h"
 #include "flashcards_app.h"
@@ -44,23 +46,44 @@
 
 static const char *TAG = "main";
 
-// The apps, in menu order
-static const app_t *const apps[] = {
-    &weather_app,
-    &clock_app,
-    &story_app,
-    &flashcards_app,
-    &reader_app,
-    &transfer_app,
-    &settings_app,
-    &power_app,
-};
-#define APP_COUNT ((int)(sizeof(apps) / sizeof(apps[0])))
+// Native apps, in menu order. Script apps follow the regular ones, alphabetically; the
+// system apps (Transfer, Settings, Power) always come last.
+static void register_apps(void)
+{
+    app_registry_add(&weather_app, false);
+    app_registry_add(&story_app, false);
+    app_registry_add(&flashcards_app, false);
+    app_registry_add(&reader_app, false);
+    app_script_init();                                      // Clock and any installed apps
+    app_registry_add(&transfer_app, true);
+    app_registry_add(&settings_app, true);
+    app_registry_add(&power_app, true);
+}
 
 #define BACKGROUND_TICKS pdMS_TO_TICKS(30 * 1000)  // how often every app's background() runs
 #define POLL_TICKS       pdMS_TO_TICKS(100)        // while a job runs, check for its result this often
 
 static int selected = 0;                // highlighted tile in the menu (also the app on screen)
+
+static int app_count(void)
+{
+    int n;
+    app_registry_list(&n);
+    return n;
+}
+
+static const app_t *app_at(int index)
+{
+    int n;
+    return app_registry_list(&n)[index];
+}
+
+static void show_menu(bool full)
+{
+    int n;
+    const app_t *const *list = app_registry_list(&n);
+    menu_ui_show(list, n, selected, full);
+}
 
 // Shows an error and stops (nothing works without Wi-Fi settings)
 static void halt(const char *title, const char *detail)
@@ -74,19 +97,20 @@ static void halt(const char *title, const char *detail)
     vTaskDelay(portMAX_DELAY);                              // wait forever
 }
 
-// Opens apps[index] and remembers it as the one to open at the next power-on
+// Opens the app at `index` and remembers it as the one to open at the next power-on
 // (unless it's one that shouldn't reopen by itself)
 static void open_app(int index)
 {
+    const app_t *app = app_at(index);
     selected = index;
-    if (!apps[index]->no_resume) {
-        settings_set_i32("last_app", index);
+    if (!app->no_resume) {
+        settings_set_str("last_app_id", app->id);
         settings_set_i32("on_menu", 0);
     }
-    ESP_LOGI(TAG, "open %s", apps[index]->name);
+    ESP_LOGI(TAG, "open %s", app->name);
     ui_show_loading();                                      // instant feedback during the full refresh
-    app_set_showing(apps[index]);
-    apps[index]->open();
+    app_set_showing(app);
+    app->open(app);
 }
 
 static void go_home(const char *why)
@@ -94,20 +118,21 @@ static void go_home(const char *why)
     ESP_LOGI(TAG, "%s -> menu", why);
     const app_t *leaving = app_showing();
     if (leaving && leaving->close) {
-        leaving->close();                                   // e.g. the Transfer app stops its server
+        leaving->close(leaving);                            // e.g. the Transfer app stops its server
     }
     settings_set_i32("on_menu", 1);                         // power-on returns to the menu
     ui_show_loading();                                      // instant feedback (quick partial refresh)
     app_set_showing(NULL);                                  // the app we left stays highlighted
-    menu_ui_show(apps, APP_COUNT, selected, true);          // full refresh: whole screen changes
+    show_menu(true);                                        // full refresh: whole screen changes
 }
 
 // Calls every app's background() (they rate-limit themselves)
 static void run_background(void)
 {
-    for (int i = 0; i < APP_COUNT; i++) {
-        if (apps[i]->background) {
-            apps[i]->background();
+    for (int i = 0; i < app_count(); i++) {
+        const app_t *app = app_at(i);
+        if (app->background) {
+            app->background(app);
         }
     }
 }
@@ -144,9 +169,11 @@ void app_main(void)
     storage_init();                                         // /store file system
     books_init();                                           // /books (e-books)
     worker_init();                                          // background jobs
-    for (int i = 0; i < APP_COUNT; i++) {
-        if (apps[i]->init) {
-            apps[i]->init();
+    register_apps();
+    for (int i = 0; i < app_count(); i++) {
+        const app_t *app = app_at(i);
+        if (app->init) {
+            app->init(app);
         }
     }
     buttons_init();
@@ -170,11 +197,14 @@ void app_main(void)
     TickType_t next_background = xTaskGetTickCount() + BACKGROUND_TICKS;
 
     // Power-on: back where we were, the last app or the menu (a new board starts on the menu).
-    // Apps marked no_resume (Transfer, Power) are never reopened by themselves.
-    int last = settings_get_i32("last_app", 0);
-    selected = (last >= 0 && last < APP_COUNT) ? last : 0;
-    if (settings_get_i32("on_menu", 1) || apps[selected]->no_resume) {
-        menu_ui_show(apps, APP_COUNT, selected, true);
+    // Apps marked no_resume (Transfer, Power) are never reopened by themselves. Remembered
+    // by id: installing or removing apps moves the others along the menu.
+    char last[32];
+    settings_get_str("last_app_id", last, sizeof(last), "");
+    int index = app_registry_find(last);
+    selected = index >= 0 ? index : 0;
+    if (index < 0 || settings_get_i32("on_menu", 1) || app_at(selected)->no_resume) {
+        show_menu(true);
     } else {
         open_app(selected);
     }
@@ -188,7 +218,7 @@ void app_main(void)
         // run, or (while a job runs) a short poll interval
         TickType_t wait = app_ticks_until(next_background);
         if (app && app->next_wakeup) {
-            TickType_t w = app->next_wakeup();
+            TickType_t w = app->next_wakeup(app);
             wait = w < wait ? w : wait;
         } else if (app == NULL) {
             TickType_t w = menu_ui_next_wakeup();           // the menu's clock
@@ -203,15 +233,35 @@ void app_main(void)
             // Timeout: background work, then the app's scheduled update
             if (app_due(next_background)) {
                 if (battery_sample() && app == NULL) {
-                    menu_ui_show(apps, APP_COUNT, selected, false);  // the menu shows the battery
+                    show_menu(false);                       // the menu shows the battery
                 }
                 run_background();
                 next_background = xTaskGetTickCount() + BACKGROUND_TICKS;
             }
             if (app && app->tick) {
-                app->tick();
+                app->tick(app);
             } else if (app == NULL) {
-                menu_ui_tick(apps, APP_COUNT, selected);   // redraws when the minute changed
+                int n;
+                const app_t *const *list = app_registry_list(&n);
+                menu_ui_tick(list, n, selected);            // redraws when the minute changed
+            }
+            continue;
+        }
+
+        // Apps were installed or removed (web portal, so Transfer is on screen): reload the
+        // script apps, keeping the same tile highlighted. Apps never see this event.
+        if (event == BUTTON_APPS_CHANGED) {
+            char keep[32];
+            snprintf(keep, sizeof(keep), "%s", app_at(selected)->id);
+            if (app && app->ctx) {
+                go_home("apps changed");                    // a script app is showing (ctx set): leave it first
+                app = NULL;
+            }
+            app_script_rescan();
+            int index = app_registry_find(keep);
+            selected = index >= 0 ? index : 0;
+            if (app == NULL) {
+                show_menu(false);
             }
             continue;
         }
@@ -223,7 +273,7 @@ void app_main(void)
         // The lock switch moved: the menu shows a padlock. Apps never see this event.
         if (event == BUTTON_LOCK_CHANGED) {
             if (app == NULL) {
-                menu_ui_show(apps, APP_COUNT, selected, false);
+                show_menu(false);
             }
             continue;
         }
@@ -237,7 +287,7 @@ void app_main(void)
         }
 
         if (app) {
-            if (!app->button(event)) {                      // the app asked to be closed (BACK)
+            if (!app->button(app, event)) {                 // the app asked to be closed (BACK)
                 go_home("back");
             }
             continue;
@@ -245,8 +295,9 @@ void app_main(void)
 
         // The menu
         if (event == BUTTON_LEFT || event == BUTTON_RIGHT) {  // move the highlight (wraps around)
-            selected = (selected + (event == BUTTON_LEFT ? APP_COUNT - 1 : 1)) % APP_COUNT;
-            menu_ui_show(apps, APP_COUNT, selected, false);   // partial: only the highlight moved
+            int n = app_count();
+            selected = (selected + (event == BUTTON_LEFT ? n - 1 : 1)) % n;
+            show_menu(false);                               // partial: only the highlight moved
         } else if (event == BUTTON_SELECT) {
             open_app(selected);
         }

@@ -31,6 +31,8 @@ typedef enum {
                                         // work (e.g. the web interface asking to show a pairing code)
     BUTTON_LOCK_CHANGED,                // not a press: the lock switch moved (see buttons_locked()).
                                         // Handled by main.c; never reaches apps.
+    BUTTON_APPS_CHANGED,                // not a press: apps were installed or removed (web portal).
+                                        // Handled by main.c; never reaches apps.
 } button_event_t;
 
 // Sets up the GPIOs and starts the task that watches the controls. A button that is already

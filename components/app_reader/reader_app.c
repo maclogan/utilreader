@@ -359,7 +359,7 @@ static void open_book(const book_info_t *b)
 
 // ---------- app callbacks ----------
 
-static void reader_open(void)
+static void reader_open(const app_t *self)
 {
     load_library(NULL);
     show_library(true);
@@ -419,7 +419,7 @@ static void chapters_button(button_event_t event)
     }
 }
 
-static bool reader_button(button_event_t event)
+static bool reader_button(const app_t *self, button_event_t event)
 {
     switch (view) {
     case VIEW_LIBRARY:
@@ -462,12 +462,12 @@ static bool marquee_running(void)
         && marquee_steps > 0 && marquee_passes < MARQUEE_PASSES;
 }
 
-static TickType_t reader_next_wakeup(void)
+static TickType_t reader_next_wakeup(const app_t *self)
 {
     return marquee_running() ? app_ticks_until(marquee_next) : portMAX_DELAY;
 }
 
-static void reader_tick(void)
+static void reader_tick(const app_t *self)
 {
     if (!marquee_running() || !app_due(marquee_next)) {
         return;
@@ -488,7 +488,7 @@ static void reader_tick(void)
     marquee_next = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
 }
 
-static void reader_background(void)
+static void reader_background(const app_t *self)
 {
     if (app_is_showing(&reader_app) && view == VIEW_LIBRARY && books_generation() != library_generation) {
         char keep[BOOK_ID_LEN + 1] = "";                    // copy: load_library() rewrites `library`
@@ -500,9 +500,16 @@ static void reader_background(void)
     }
 }
 
+// Menu icon (the drawing lives with the app's other screens)
+static void app_icon(const app_t *self, int cx, int cy)
+{
+    reader_ui_draw_app_icon(cx, cy);
+}
+
 const app_t reader_app = {
+    .id = "books",
     .name = "Books",
-    .draw_icon = reader_ui_draw_app_icon,
+    .draw_icon = app_icon,
     .open = reader_open,
     .button = reader_button,
     .next_wakeup = reader_next_wakeup,

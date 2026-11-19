@@ -7,7 +7,7 @@ A small web server (ESP-IDF `esp_http_server`, port 80) and the single page it s
 | File | What it does |
 |---|---|
 | `webui.c`, `include/webui.h` | Server, API handlers, pairing, status for the Transfer app |
-| `index.html` | The page: pairing, books, upload with conversion, saved words (plain JS, no libraries) |
+| `index.html` | The page: pairing, apps (install from zip/folder, log, remove), books, upload with conversion, saved words (plain JS, no libraries) |
 
 ## Pairing
 
@@ -38,6 +38,11 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `DELETE /api/books?id=ID` | Delete a book (and its index, chapters, position) |
 | `POST /api/upload?id=ID&offset=N&total=T` | Body: the next chunk (≤ 64 KB) → `{"have","done"}`; 409 `{"have"}` if out of step; 507 if full |
 | `GET /api/words` | Saved words `[{"w","p","d","day"}]` |
+| `GET /api/apps` | Installed Lua apps `[{"id","name","version","author","description","api"}]` |
+| `POST /api/apps/upload?id=ID&file=NAME&offset=N&total=T[&new=1]` | Body: the next chunk of one package file → `{"have"}`; 409 `{"have"}` if out of step; 507 if full. `new=1` on the package's first chunk clears an earlier attempt |
+| `POST /api/apps/install?id=ID` | Install the uploaded package → `{"installed":true}`, or 400 `{"error"}` (bad manifest, API too new, no main.lua). The menu updates straight away |
+| `DELETE /api/apps?id=ID` | Remove an app with its settings and data |
+| `GET /api/apps/log?id=ID` | The app's recent log (text): `print()` output and errors |
 
 ## Uploading
 

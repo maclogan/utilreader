@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Keys shared between components (each component's own keys stay private to it)
@@ -14,3 +15,9 @@ int32_t settings_get_i32(const char *key, int32_t fallback);
 
 // Stores a value. Skips the flash write if it's unchanged.
 void settings_set_i32(const char *key, int32_t value);
+
+// The stored string for `key` into out[size]; `fallback` if it was never set
+void settings_get_str(const char *key, char *out, size_t size, const char *fallback);
+
+// Stores a string. Skips the flash write if it's unchanged.
+void settings_set_str(const char *key, const char *value);

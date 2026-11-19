@@ -14,6 +14,8 @@
   main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   h2 { font-size: 16px; margin: 0 0 12px; }
+  h3 { font-size: 14px; margin: 16px 0 6px; }
+  pre.log { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 220px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; margin: 8px 0 0; }
   .sub { color: var(--mute); margin: 0 0 20px; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
   table { width: 100%; border-collapse: collapse; }
@@ -55,6 +57,24 @@
   </section>
 
   <div id="app" class="hidden">
+  <section>
+    <h2>Apps</h2>
+    <div id="apps" class="muted">Loading…</div>
+    <pre class="log hidden" id="applog"></pre>
+    <h3>Install an app</h3>
+    <p class="muted">An app package: a <b>.zip</b>, or a folder, holding <b>app.json</b>, <b>main.lua</b> and
+      optionally <b>icon.png</b> (turned into the 32×32 black-and-white icon here). Installing an app that's
+      already there updates it and keeps its settings and saved data. How to write one: <b>docs/api.md</b>.</p>
+    <div class="row">
+      <label>Zip <input type="file" id="appzip" accept=".zip"></label>
+      <label>Folder <input type="file" id="appdir" webkitdirectory></label>
+    </div>
+    <div class="row">
+      <div class="grow"><div class="bar"><div id="appprogress"></div></div></div>
+      <span id="appstatus" class="muted"></span>
+    </div>
+  </section>
+
   <section>
     <h2>Books</h2>
     <div id="books" class="muted">Loading…</div>
@@ -139,6 +159,8 @@ async function verify() {
 $("verify").onclick = verify;
 $("code").onkeydown = e => { if (e.key === "Enter") verify(); };
 
+const CHUNK = 32 * 1024;                            // upload chunk size (books and apps)
+
 // ---------- device data ----------
 async function getJSON(url, opts) {
   const r = await api(url, opts);
@@ -176,8 +198,149 @@ async function loadWords() {
       `<td class="num muted">${esc(w.day)}</td></tr>`).join("") + `</table>`;
 }
 
+// ---------- apps ----------
+async function loadApps() {
+  const apps = await getJSON("/api/apps");
+  if (!apps.length) { $("apps").innerHTML = "No apps installed."; return; }
+  $("apps").innerHTML = `<table><tr><th>App</th><th>Version</th><th>About</th><th></th></tr>` +
+    apps.map(a => `<tr><td><b>${esc(a.name || a.id)}</b><br><span class="muted">${esc(a.id)}</span></td>` +
+      `<td>${esc(a.version || "")}</td><td>${esc(a.description || "")}` +
+      (a.author ? `<br><span class="muted">by ${esc(a.author)}</span>` : "") + `</td>` +
+      `<td class="num"><button data-log="${esc(a.id)}">Log</button> ` +
+      `<button class="danger" data-del="${esc(a.id)}" data-name="${esc(a.name || a.id)}">Remove</button></td></tr>`).join("") +
+    `</table>`;
+  $("apps").querySelectorAll("button[data-log]").forEach(btn => btn.onclick = async () => {
+    const r = await api("/api/apps/log?id=" + btn.dataset.log);
+    const text = await r.text();
+    $("applog").textContent = `${btn.dataset.log}:\n` + (text || "(nothing logged since start-up)");
+    $("applog").classList.remove("hidden");
+  });
+  $("apps").querySelectorAll("button[data-del]").forEach(btn => btn.onclick = async () => {
+    if (!confirm(`Remove "${btn.dataset.name}" with its settings and saved data?`)) return;
+    btn.disabled = true;
+    await api("/api/apps?id=" + btn.dataset.del, { method: "DELETE" }).catch(() => {});
+    loadApps().catch(() => {});
+  });
+}
+
+const APP_ID = /^[a-z0-9_]{1,24}$/;
+const APP_FILE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,31}$/;
+const SKIP = new Set(["icon.png", "README.md", "readme.md", "LICENSE"]);   // for people, not the device
+
+// icon.png (any size) -> 128 bytes: 32x32, 1 bit per pixel, MSB = leftmost, 1 = black
+async function iconBits(pngBytes) {
+  const img = await createImageBitmap(new Blob([pngBytes]));
+  const c = document.createElement("canvas");
+  c.width = c.height = 32;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff";                         // transparent parts count as white
+  g.fillRect(0, 0, 32, 32);
+  g.drawImage(img, 0, 0, 32, 32);
+  const px = g.getImageData(0, 0, 32, 32).data, bits = new Uint8Array(128);
+  for (let i = 0; i < 32 * 32; i++) {
+    const lum = (px[i * 4] * 30 + px[i * 4 + 1] * 59 + px[i * 4 + 2] * 11) / 100;
+    if (lum < 128) bits[(i >> 5) * 4 + ((i & 31) >> 3)] |= 0x80 >> (i & 7);
+  }
+  return bits;
+}
+
+// files: Map of name -> Uint8Array, the package's top-level files
+async function installApp(files) {
+  const status = t => $("appstatus").innerHTML = t;
+  $("appprogress").style.width = "0";
+  if (!files.has("app.json")) throw new Error("no app.json in the package");
+  let m;
+  try { m = JSON.parse(new TextDecoder().decode(files.get("app.json"))); }
+  catch (e) { throw new Error("app.json isn't valid JSON: " + e.message); }
+  if (!APP_ID.test(m.id || "")) throw new Error("app.json id must be 1-24 of a-z, 0-9, _");
+  if (!m.name) throw new Error("app.json has no name");
+  if (!Number.isInteger(m.api)) throw new Error("app.json has no api version");
+  if (!files.has("main.lua")) throw new Error("no main.lua in the package");
+
+  const send = new Map([["app.json", files.get("app.json")]]);   // first: it starts the upload (new=1)
+  for (const [name, bytes] of files) {
+    if (SKIP.has(name) || name === "app.json" || !bytes.length) continue;
+    if (!APP_FILE.test(name)) throw new Error(`file name "${name}" isn't allowed (letters, digits, . _ -; up to 32)`);
+    send.set(name, bytes);
+  }
+  if (!send.has("icon.bin") && files.has("icon.png")) send.set("icon.bin", await iconBits(files.get("icon.png")));
+
+  const total = [...send.values()].reduce((n, b) => n + b.length, 0);
+  let done = 0, first = true;
+  for (const [name, bytes] of send) {
+    let offset = 0, failures = 0;
+    while (offset < bytes.length) {
+      const chunk = bytes.subarray(offset, Math.min(offset + CHUNK, bytes.length));
+      let r;
+      try {
+        r = await api(`/api/apps/upload?id=${m.id}&file=${encodeURIComponent(name)}&offset=${offset}` +
+                      `&total=${bytes.length}${first ? "&new=1" : ""}`, { method: "POST", body: chunk });
+      } catch (e) {
+        if (e.message === "not paired") throw e;
+        if (++failures > 5) throw new Error("the device stopped answering");
+        await new Promise(res => setTimeout(res, 1000 * failures));
+        continue;
+      }
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 409) { offset = j.have || 0; continue; }
+      if (!r.ok) throw new Error(`${name}: ${j.error || "HTTP " + r.status}`);
+      first = false;
+      failures = 0;
+      done += j.have - offset;
+      offset = j.have;
+      $("appprogress").style.width = (100 * done / total).toFixed(1) + "%";
+      status(`Sending ${esc(name)}`);
+    }
+  }
+  status("Installing…");
+  const r = await api("/api/apps/install?id=" + m.id, { method: "POST" });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+  status(`Installed ${esc(m.name)} ${esc(m.version || "")}: it's on the board's menu`);
+  loadApps().catch(() => {});
+}
+
+// Top-level files of a package; a zip may hold them inside one folder ("clock/app.json")
+function packageFiles(entries) {        // entries: [[path, getBytes]]
+  const manifest = entries.map(([p]) => p).filter(p => p.split("/").pop() === "app.json")
+    .sort((a, b) => a.split("/").length - b.split("/").length)[0];
+  if (!manifest) throw new Error("no app.json in the package");
+  const base = manifest.slice(0, manifest.length - "app.json".length);
+  return entries.filter(([p]) => p.startsWith(base) && p.length > base.length && !p.slice(base.length).includes("/"))
+    .map(([p, get]) => [p.slice(base.length), get]);
+}
+
+async function installFrom(entries) {
+  try {
+    const files = new Map();
+    for (const [name, get] of packageFiles(entries)) files.set(name, await get());
+    await installApp(files);
+  } catch (e) {
+    $("appstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+$("appzip").onchange = async () => {
+  const file = $("appzip").files[0];
+  if (!file) return;
+  try {
+    const read = await readZip(await file.arrayBuffer());
+    await installFrom(read.names.filter(n => !n.endsWith("/")).map(n => [n, () => read(n)]));
+  } catch (e) {
+    $("appstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+  $("appzip").value = "";
+};
+
+$("appdir").onchange = async () => {
+  const list = [...$("appdir").files];
+  await installFrom(list.map(f => [f.webkitRelativePath, async () => new Uint8Array(await f.arrayBuffer())]));
+  $("appdir").value = "";
+};
+
 function refresh() {
   $("app").classList.remove("hidden");
+  loadApps().catch(e => $("apps").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadInfo().catch(e => $("space").textContent = e.message);
   loadBooks().catch(e => $("books").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadWords().catch(e => $("words").innerHTML = `<span class="err">${esc(e.message)}</span>`);
@@ -248,7 +411,7 @@ function parseMarkup(str) {
   return doc;
 }
 
-// Minimal ZIP reader for EPUB: stored and deflated entries
+// Minimal ZIP reader for EPUB and app packages: stored and deflated entries
 async function readZip(buf) {
   const v = new DataView(buf), u8 = new Uint8Array(buf), files = {};
   let eocd = -1;
@@ -266,7 +429,7 @@ async function readZip(buf) {
     files[name] = { method, csize, local };
     p += 46 + nlen + xlen + clen;
   }
-  return async function read(name) {
+  const read = async function (name) {
     const f = files[name];
     if (!f) return null;
     const start = f.local + 30 + v.getUint16(f.local + 26, true) + v.getUint16(f.local + 28, true);
@@ -276,6 +439,8 @@ async function readZip(buf) {
     const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   };
+  read.names = Object.keys(files);                  // every entry's path (app packages list them)
+  return read;
 }
 
 function resolve(base, href) {
@@ -393,7 +558,6 @@ $("file").onchange = async () => {
 };
 
 // ---------- upload ----------
-const CHUNK = 32 * 1024;
 
 $("upload").onclick = async () => {
   if (!pending) return;
