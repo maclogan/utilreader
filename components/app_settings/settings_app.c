@@ -1,8 +1,13 @@
 #include "settings_app.h"
 
+#include <dirent.h>                     // the music folder picker
 #include <stdio.h>                      // snprintf()
+#include <stdlib.h>                     // qsort()
 #include <string.h>                     // strncmp()
+#include <strings.h>                    // strcasecmp()
 #include <time.h>
+#include "font16.h"                     // folder names
+#include "sdcard.h"                     // the microSD card
 #include "epd.h"                        // drawing, epd_set_rotated()
 #include "esp_log.h"
 #include "local_time.h"                 // reading and setting the clock
@@ -14,20 +19,181 @@ static const char *TAG = "settings_app";
 // Layout (pixels). The title bar takes the left UI_SIDEBAR_W columns.
 #define LEFT        (UI_CONTENT_X + 4)
 #define ROW_Y       6                   // top of the first row
-#define ROW_H       26                  // row spacing
-#define BOX_H       24                  // highlight bar height
+#define ROW_H       22                  // row spacing
+#define BOX_H       20                  // highlight bar height
 #define VALUE_X     (UI_CONTENT_X + 100)    // left edge of the values
 #define CHAR_W      12                  // 5x7 font at scale 2: 6 px per character x 2
 #define INFO_Y      94                  // two lines of small text at the bottom
 #define INFO_H      13
 
-typedef enum { ROW_DATE, ROW_TIME, ROW_ROTATE, ROW_COUNT } row_t;
-static const char *const labels[ROW_COUNT] = {"Date", "Time", "Rotate"};
+typedef enum { ROW_DATE, ROW_TIME, ROW_ROTATE, ROW_MUSIC, ROW_COUNT } row_t;
+static const char *const labels[ROW_COUNT] = {"Date", "Time", "Rotate", "Music"};
 
 static int row = ROW_DATE;              // highlighted row
 static int editing = -1;                // field being edited (-1 = choosing a row)
 static struct tm edit;                  // the date/time being edited (local)
 static long drawn_minute = -1;          // minute (since 1970) the screen shows
+
+// ---------- music folder picker ----------
+// Lists the folders inside `pick_dir` on the card. Entry 0 is "Use this folder"; the rest
+// open a folder. BACK goes up a level, and out of the picker from the top.
+
+#define PICK_MAX    64
+#define PICK_ROWS   5
+#define PICK_ROW_H  18
+
+static void info_line(int line, const char *text);
+
+static bool picking;
+static char pick_dir[128];              // "" = the card's top level, else "/Music/Rock"
+static char *pick_names[PICK_MAX];
+static int pick_count, pick_sel;
+static bool pick_no_card;
+
+static int compare_names(const void *a, const void *b)
+{
+    return strcasecmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void pick_load(void)
+{
+    for (int i = 0; i < pick_count; i++) {
+        free(pick_names[i]);
+    }
+    pick_count = 0;
+    pick_sel = 0;
+    pick_no_card = !sdcard_mount();
+    if (pick_no_card) {
+        return;
+    }
+    char path[160];
+    snprintf(path, sizeof(path), "%s%s", SDCARD_ROOT, pick_dir);
+    DIR *d = opendir(path);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL && pick_count < PICK_MAX) {
+        if (e->d_type == DT_DIR && e->d_name[0] != '.' && strcasecmp(e->d_name, "System Volume Information")) {
+            pick_names[pick_count] = strdup(e->d_name);
+            if (pick_names[pick_count]) {
+                pick_count++;
+            }
+        }
+    }
+    if (d) {
+        closedir(d);
+    }
+    qsort(pick_names, pick_count, sizeof(char *), compare_names);
+}
+
+static void pick_draw(bool full)
+{
+    if (!full && !epd_is_awake()) {
+        full = true;
+    }
+    if (full) {
+        epd_init();
+    }
+    epd_clear(EPD_WHITE);
+    ui_sidebar("Music folder", NULL);
+    char line[160];
+    if (pick_no_card) {
+        font16_draw_text(LEFT + 4, 30, "No microSD card", EPD_BLACK);
+        info_line(1, "BACK: cancel");
+    } else {
+        snprintf(line, sizeof(line), "In: %s", pick_dir[0] ? pick_dir : "/ (top of the card)");
+        epd_draw_text(LEFT, 3, line, 1, EPD_BLACK);
+        int n = pick_count + 1;
+        int first = pick_sel / PICK_ROWS * PICK_ROWS;
+        for (int i = first; i < n && i < first + PICK_ROWS; i++) {
+            int y = 14 + (i - first) * PICK_ROW_H;
+            uint8_t color = EPD_BLACK;
+            if (i == pick_sel) {
+                epd_draw_rect(UI_CONTENT_X, y, UI_CONTENT_W, PICK_ROW_H - 1, EPD_BLACK, true);
+                color = EPD_WHITE;
+            }
+            if (i == 0) {
+                font16_draw_text(LEFT + 4, y + 1, "[ Use this folder ]", color);
+            } else {
+                snprintf(line, sizeof(line), "%s/", pick_names[i - 1]);
+                font16_draw_text(LEFT + 4, y + 1, line, color);
+            }
+        }
+        epd_draw_text(LEFT, EPD_HEIGHT - 9, "press: open / choose   BACK: up", 1, EPD_BLACK);
+    }
+    if (full) {
+        epd_display();
+    } else {
+        epd_display_partial();
+    }
+}
+
+static void pick_start(void)
+{
+    // Start in the folder above the current choice, with it highlighted
+    char cur[128];
+    settings_get_str(SETTING_MUSIC_DIR, cur, sizeof(cur), SETTING_MUSIC_DIR_DEFAULT);
+    char *slash = strrchr(cur, '/');
+    const char *leaf = slash ? slash + 1 : cur;
+    snprintf(pick_dir, sizeof(pick_dir), "%.*s", slash ? (int)(slash - cur) : 0, cur);
+    picking = true;
+    pick_load();
+    for (int i = 0; i < pick_count; i++) {
+        if (!strcasecmp(pick_names[i], leaf)) {
+            pick_sel = i + 1;
+        }
+    }
+    pick_draw(false);
+}
+
+// Returns false when the picker closes (the settings list is redrawn by the caller)
+static bool pick_button(button_event_t event)
+{
+    int n = pick_count + 1;
+    switch (event) {
+    case BUTTON_LEFT:
+    case BUTTON_LEFT_HOLD:
+        pick_sel = (pick_sel + n - 1) % n;
+        break;
+    case BUTTON_RIGHT:
+    case BUTTON_RIGHT_HOLD:
+        pick_sel = (pick_sel + 1) % n;
+        break;
+    case BUTTON_SELECT:
+        if (pick_no_card) {
+            pick_load();                                    // card inserted since? try again
+        } else if (pick_sel == 0) {
+            settings_set_str(SETTING_MUSIC_DIR, pick_dir[0] ? pick_dir : "/");
+            ESP_LOGI(TAG, "music folder: %s", pick_dir[0] ? pick_dir : "/");
+            picking = false;
+            return false;
+        } else {
+            size_t len = strlen(pick_dir);
+            snprintf(pick_dir + len, sizeof(pick_dir) - len, "/%s", pick_names[pick_sel - 1]);
+            pick_load();
+        }
+        break;
+    case BUTTON_BACK: {
+        char *slash = strrchr(pick_dir, '/');
+        if (pick_no_card || slash == NULL) {
+            picking = false;                                // top of the card: cancel
+            return false;
+        }
+        char leaf[64];
+        snprintf(leaf, sizeof(leaf), "%s", slash + 1);
+        *slash = '\0';
+        pick_load();
+        for (int i = 0; i < pick_count; i++) {
+            if (!strcmp(pick_names[i], leaf)) {
+                pick_sel = i + 1;                           // back on the folder we came from
+            }
+        }
+        break;
+    }
+    default:
+        return true;
+    }
+    pick_draw(false);
+    return true;
+}
 
 // Fields of each editable row, as character positions in its value text
 typedef struct { int min, max, step_hold, first_char, chars; } field_t;
@@ -138,6 +304,13 @@ static void draw(bool full)
         char value[24];
         if (r == ROW_ROTATE) {
             snprintf(value, sizeof(value), "%s", epd_rotated() ? "Flipped" : "Normal");
+        } else if (r == ROW_MUSIC) {
+            char dir[64];
+            settings_get_str(SETTING_MUSIC_DIR, dir, sizeof(dir), SETTING_MUSIC_DIR_DEFAULT);
+            int fits = (EPD_WIDTH - VALUE_X) / CHAR_W;      // keep the end: the folder's own name
+            int len = strlen(dir);
+            snprintf(value, sizeof(value), "%s%.*s", len > fits ? ".." : "", (int)sizeof(value) - 3,
+                     len > fits ? dir + len - fits + 2 : dir);
         } else if (!have_time && t == &now) {
             snprintf(value, sizeof(value), "not set");
         } else if (r == ROW_DATE) {
@@ -206,6 +379,7 @@ static void settings_open(const app_t *self)
 {
     row = ROW_DATE;
     editing = -1;
+    picking = false;
     draw(true);
 }
 
@@ -223,7 +397,9 @@ static bool button_choosing(button_event_t event)
         draw(false);
         return true;
     case BUTTON_SELECT:
-        if (row == ROW_ROTATE) {
+        if (row == ROW_MUSIC) {
+            pick_start();
+        } else if (row == ROW_ROTATE) {
             bool on = !epd_rotated();
             epd_set_rotated(on);
             settings_set_i32(SETTING_ROTATE_180, on);
@@ -286,13 +462,19 @@ static bool button_editing(button_event_t event)
 
 static bool settings_button(const app_t *self, button_event_t event)
 {
+    if (picking) {
+        if (!pick_button(event)) {
+            draw(false);                                    // back to the list
+        }
+        return true;
+    }
     return editing >= 0 ? button_editing(event) : button_choosing(event);
 }
 
 // The time on screen changes every minute while choosing a row
 static TickType_t settings_next_wakeup(const app_t *self)
 {
-    if (editing >= 0 || !local_time_synced()) {
+    if (editing >= 0 || picking || !local_time_synced()) {
         return portMAX_DELAY;
     }
     return pdMS_TO_TICKS((60 - time(NULL) % 60) * 1000 + 200);
@@ -300,7 +482,7 @@ static TickType_t settings_next_wakeup(const app_t *self)
 
 static void settings_tick(const app_t *self)
 {
-    if (editing < 0 && (long)(time(NULL) / 60) != drawn_minute) {  // also called early: check
+    if (editing < 0 && !picking && (long)(time(NULL) / 60) != drawn_minute) {  // also called early: check
         draw(false);
     }
 }

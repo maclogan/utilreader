@@ -1,0 +1,4 @@
+## Espressif's audio decoders (MP3, AAC/M4A, FLAC, OGG Vorbis/Opus, WAV), prebuilt for the
+## ESP32-S3. Licence: Espressif Modified MIT (use on Espressif chips only).
+dependencies:
+  espressif/esp_audio_codec: "2.6.2"

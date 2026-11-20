@@ -5,7 +5,7 @@ exist; it knows nothing about what happens inside them.
 
 | File | What it does |
 |---|---|
-| `main.c` | Start-up sequence, registering the native apps, the event loop |
+| `main.c` | Start-up sequence, registering the native apps (Story, Cards, Books, Music, then script apps, then Transfer, Settings, Power), the event loop |
 | `menu_ui.c/.h` | Draws the row of app tiles (scrolls when there are more than 4) |
 | `Kconfig.projbuild` | The *Wi-Fi*, *Chinese Story* and *Hardware* menus in `idf.py menuconfig` |
 | `CMakeLists.txt` | Which components the launcher uses |
@@ -48,6 +48,8 @@ buttons_wait(wait)
               minute change while the menu shows)
   LOCK_CHANGED -> redraw the menu's padlock (if the menu is showing); apps never see it
   HOME     -> the current app's close(), then the menu (from anywhere)
+  SELECT_HOLD -> for apps with select_hold (Music, script apps), passed on; for the
+              menu and other apps it becomes SELECT
   WAKE     -> the current app's button() (another task wants attention, e.g. the web server)
   other    -> current app's button(); if it returns false: its close(), then the menu
               (on the menu itself: LEFT/RIGHT move, SELECT opens)

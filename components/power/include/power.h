@@ -23,8 +23,13 @@
 // sleep and this never returns. Does nothing after a reset or first power-up.
 void power_boot_check(void);
 
-// Finishes background jobs, shows the "off" screen and enters deep sleep. Never returns.
+// Finishes background jobs, runs the off hooks, shows the "off" screen and enters deep
+// sleep. Never returns.
 void power_off(void);
+
+// Registers fn to run at the start of power_off(), in the main task (e.g. the music app
+// stops playback and saves its place). Up to 4 hooks.
+void power_add_off_hook(void (*fn)(void));
 
 // Menu tile that turns the device off when opened
 extern const app_t power_app;

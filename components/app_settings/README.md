@@ -1,6 +1,6 @@
 # app_settings: Settings app
 
-Set the date and time by hand, and turn the screen upside down.
+Set the date and time by hand, turn the screen upside down, and choose the music folder.
 
 | File | What it does |
 |---|---|
@@ -10,7 +10,7 @@ Set the date and time by hand, and turn the screen upside down.
 
 | Screen | Left / right | Hold left / right | Press | BACK |
 |---|---|---|---|---|
-| **Rows** | Choose Date, Time or Rotate | Same | Date/Time: start editing. Rotate: flip the screen | Main menu |
+| **Rows** | Choose Date, Time, Rotate or Music | Same | Date/Time: start editing. Rotate: flip the screen. Music: pick a folder | Main menu |
 | **Editing** | Change the boxed field by 1 | Change it by more (year/day/minute 10, month 3, hour 6) | Next field; on the last field, save | Cancel |
 
 - **Date** edits year, month, day (2024-2099; the day is kept valid for the month).
@@ -20,6 +20,11 @@ Set the date and time by hand, and turn the screen upside down.
 - **Rotate** flips the picture 180° straight away (for an enclosure that holds the board
   the other way up) and remembers it in flash (`SETTING_ROTATE_180`). `main.c` applies it
   at start-up before anything is drawn, so the "off" screen matches too.
+
+- **Music** opens a folder picker on the microSD card: the first entry, **Use this
+  folder**, chooses the folder you're in; the others open a subfolder; BACK goes up a level
+  (and out, from the top). Saved as `SETTING_MUSIC_DIR` (default `/Music`); the Music app
+  rescans when it next opens.
 
 Under the rows: when the clock was last set from the internet, and the time zone.
 

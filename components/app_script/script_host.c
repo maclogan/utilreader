@@ -502,6 +502,7 @@ static const char *button_name(button_event_t event)
     case BUTTON_BACK:       return "back";
     case BUTTON_LEFT_HOLD:  return "left_hold";
     case BUTTON_RIGHT_HOLD: return "right_hold";
+    case BUTTON_SELECT_HOLD: return "select_hold";
     default:                return NULL;
     }
 }
@@ -515,6 +516,19 @@ static bool script_button(const app_t *self, button_event_t event)
     const char *name = button_name(event);
     if (name == NULL) {
         return true;
+    }
+    if (event == BUTTON_SELECT_HOLD) {
+        // An app that handles the hold returns true; anything else, and it's a plain press
+        bool handled = false;
+        if (!call(s, "on_button", name, &handled)) {
+            show_error(s);
+            return true;
+        }
+        if (handled || s->close_requested) {
+            return !s->close_requested;
+        }
+        name = "select";
+        event = BUTTON_SELECT;
     }
     bool keep = event != BUTTON_BACK;                       // without on_button, BACK leaves
     if (!call(s, "on_button", name, &keep)) {
@@ -624,6 +638,7 @@ static script_t *read_app(const char *id)
         .init = script_init,
         .open = script_open,
         .button = script_button,
+        .select_hold = true,                                // script_button falls back to "select"
         .next_wakeup = script_next_wakeup,
         .tick = script_tick,
         .background = script_background,

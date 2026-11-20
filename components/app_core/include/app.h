@@ -58,6 +58,10 @@ struct app {
     // Transfer, whose web server should only run when opened on purpose
     bool no_resume;
 
+    // true: the app gets BUTTON_SELECT_HOLD (center held). Otherwise main.c delivers a held
+    // center as an ordinary BUTTON_SELECT.
+    bool select_hold;
+
     void *ctx;                          // for the implementation (the script host's per-app state)
 };
 

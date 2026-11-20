@@ -1,17 +1,18 @@
 /*
  * The controls, wired to the 14-pin header (P2) of the Waveshare ESP32-S3-LR1121-ePaper-2.9:
- * a 5-way tact switch with only left / right / center connected, one push button
- * (BACK / HOME), and a lock slide switch. A background task watches them and turns
+ * a 5-way tact switch with only left / right / center connected (through the I2C I/O
+ * expander, expander.h), one push button (BACK / HOME), and a lock slide switch. A background task watches them and turns
  * presses into events. The event names describe what they mean to apps
  * (previous / next / select / back / home):
  *
  *   5-way left   tap -> BUTTON_LEFT     hold -> BUTTON_LEFT_HOLD
  *   5-way right  tap -> BUTTON_RIGHT    hold -> BUTTON_RIGHT_HOLD
- *   5-way center     -> BUTTON_SELECT
+ *   5-way center tap -> BUTTON_SELECT   hold -> BUTTON_SELECT_HOLD
  *   button       tap -> BUTTON_BACK     hold -> BUTTON_HOME
  *
  * The board's own KEY button does the same as the BACK / HOME button (handy before anything
- * is wired). While the lock switch is on, presses are ignored. The BACK / HOME button also
+ * is wired). Taps on controls with a hold gesture arrive when they're released. While the
+ * lock switch is on, presses are ignored. The BACK / HOME button also
  * turns the device on (see power.h). Wiring is in README.md.
  */
 #pragma once
@@ -33,6 +34,9 @@ typedef enum {
                                         // Handled by main.c; never reaches apps.
     BUTTON_APPS_CHANGED,                // not a press: apps were installed or removed (web portal).
                                         // Handled by main.c; never reaches apps.
+    BUTTON_SELECT_HOLD,                 // center held for LONG_PRESS_MS. Only apps with
+                                        // app_t.select_hold get it; for the rest main.c turns
+                                        // it into BUTTON_SELECT
 } button_event_t;
 
 // Sets up the GPIOs and starts the task that watches the controls. A button that is already

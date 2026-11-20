@@ -25,6 +25,7 @@
 #include "epd.h"                  // halt() screen
 #include "esp_log.h"
 #include "flashcards_app.h"
+#include "music_app.h"
 #include "reader_app.h"
 #include "settings_app.h"
 #include "transfer_app.h"
@@ -52,6 +53,7 @@ static void register_apps(void)
     app_registry_add(&story_app, false);
     app_registry_add(&flashcards_app, false);
     app_registry_add(&reader_app, false);
+    app_registry_add(&music_app, false);
     app_script_init();                                      // Weather, Clock and any installed apps
     app_registry_add(&transfer_app, true);
     app_registry_add(&settings_app, true);
@@ -278,6 +280,11 @@ void app_main(void)
                 show_menu(false);
             }
             continue;
+        }
+
+        // Center held: only apps that ask for it see the hold; for everyone else it's a press
+        if (event == BUTTON_SELECT_HOLD && (app == NULL || !app->select_hold)) {
+            event = BUTTON_SELECT;
         }
 
         // HOME (BACK held) from anywhere: the menu. Jobs carry on in the background.

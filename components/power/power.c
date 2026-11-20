@@ -2,6 +2,7 @@
 
 #include "battery.h"                    // battery_sleep()
 #include "buttons.h"                    // buttons_power_on_held(), buttons_prepare_wake()
+#include "sdcard.h"                     // sdcard_unmount()
 #include "epd.h"                        // the "off" screen, epd_power_down()
 #include "esp_log.h"
 #include "esp_sleep.h"                  // deep sleep and the wake-up cause
@@ -58,9 +59,25 @@ void power_boot_check(void)
     epd_display_partial();
 }
 
+#define MAX_OFF_HOOKS 4
+static void (*off_hooks[MAX_OFF_HOOKS])(void);
+
+void power_add_off_hook(void (*fn)(void))
+{
+    for (int i = 0; i < MAX_OFF_HOOKS; i++) {
+        if (off_hooks[i] == NULL || off_hooks[i] == fn) {
+            off_hooks[i] = fn;
+            return;
+        }
+    }
+}
+
 void power_off(void)
 {
     ESP_LOGI(TAG, "turning off");
+    for (int i = 0; i < MAX_OFF_HOOKS && off_hooks[i]; i++) {
+        off_hooks[i]();                                     // e.g. music: stop, DAC off, save place
+    }
     for (int waited = 0; worker_any_pending() && waited < JOB_WAIT_MS; waited += 100) {
         worker_dispatch();                                  // apply results so files get saved
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -69,6 +86,7 @@ void power_off(void)
     epd_init();
     draw_off_screen("Hold BACK to turn on");
     epd_display();                                          // full refresh: a clean image to keep
+    sdcard_unmount();                                       // before the rail goes off
     epd_power_down();                                       // panel asleep, peripheral rail off
 
     wifi_disconnect();

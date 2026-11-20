@@ -6,18 +6,20 @@
 #include "esp_log.h"
 #include "esp_sleep.h"                  // wake-up on the BACK / HOME button
 #include "esp_timer.h"                  // esp_timer_get_time(): time since boot
+#include "expander.h"                   // the 5-way switch, on the I2C I/O expander
 #include "freertos/queue.h"             // queue that carries events to app_main
 #include "freertos/task.h"              // xTaskCreate(), vTaskDelay()
 
 static const char *TAG = "buttons";
 
 // Waveshare ESP32-S3-LR1121-ePaper-2.9, 14-pin header P2. Every control connects its pin to
-// GND when pressed (or, for the lock switch, while locked); the firmware turns on the pull-ups.
-// GPIO2-5 are the header's general-purpose pins; GPIO44 is its RX pin (UART0 receive, unused
-// by the firmware: logs go out over USB as well).
-#define PIN_LEFT        4               // header GP4: 5-way switch, left
-#define PIN_RIGHT       5               // header GP5: 5-way switch, right
-#define PIN_CENTER      3               // header GP3: 5-way switch, center (pressed in)
+// GND when pressed (or, for the lock switch, while locked); the pull-ups are internal.
+// The 5-way switch is on the I/O expander (expander.h), which frees GPIO3-5 for audio.
+// GPIO44 is the header's RX pin (UART0 receive, unused: the console is on USB).
+#define EXP(bit)        (100 + (bit))   // "pin" numbers >= 100 are expander pins
+#define PIN_LEFT        EXP(EXPANDER_LEFT)
+#define PIN_RIGHT       EXP(EXPANDER_RIGHT)
+#define PIN_CENTER      EXP(EXPANDER_CENTER)
 #define PIN_BACK        2               // header GP2: BACK / HOME button, also turns the device on
 #define PIN_KEY         1               // the board's KEY button (10k pull-up on the board): same as BACK / HOME
 #define PIN_LOCK        44              // header RX: lock slide switch, closed to GND = locked
@@ -35,11 +37,12 @@ static const char *TAG = "buttons";
 #define POWER_PINS      (PIN_MASK(PIN_BACK) | PIN_MASK(PIN_KEY))
 
 static QueueHandle_t events;            // button events waiting to be handled by app_main
+static uint8_t expander_pins = 0xFF;    // last expander reading (1 = released)
 static volatile bool locked = false;    // lock switch on: presses are dropped
 
 // One physical input and the events it produces
 typedef struct {
-    int pin;                            // GPIO number
+    int pin;                            // GPIO number, or EXP(bit) for an expander pin
     button_event_t tap;                 // sent on a short press
     button_event_t hold;                // sent once after LONG_PRESS_MS, or NO_HOLD
     bool pressed;                       // current debounced state
@@ -53,7 +56,7 @@ typedef struct {
 static button_t buttons[] = {
     {.pin = PIN_LEFT,   .tap = BUTTON_LEFT,   .hold = BUTTON_LEFT_HOLD},
     {.pin = PIN_RIGHT,  .tap = BUTTON_RIGHT,  .hold = BUTTON_RIGHT_HOLD},
-    {.pin = PIN_CENTER, .tap = BUTTON_SELECT, .hold = NO_HOLD},
+    {.pin = PIN_CENTER, .tap = BUTTON_SELECT, .hold = BUTTON_SELECT_HOLD},
     {.pin = PIN_BACK,   .tap = BUTTON_BACK,   .hold = BUTTON_HOME},
     {.pin = PIN_KEY,    .tap = BUTTON_BACK,   .hold = BUTTON_HOME},
 };
@@ -64,7 +67,17 @@ static int lock_change_ms;
 
 static bool is_low(int pin)
 {
+    if (pin >= EXP(0)) {
+        return !(expander_pins & (1 << (pin - EXP(0))));
+    }
     return gpio_get_level(pin) == PRESSED_LEVEL;
+}
+
+// Reads the expander once per poll. A failed read counts as "nothing pressed".
+static void read_expander(void)
+{
+    uint8_t v;
+    expander_pins = expander_read(&v) ? v : 0xFF;
 }
 
 static void send(button_event_t e)
@@ -139,6 +152,7 @@ static void button_task(void *arg)
 {
     while (1) {
         update_lock();
+        read_expander();
         for (int i = 0; i < BUTTON_COUNT; i++) {
             update_button(&buttons[i]);
         }
@@ -168,10 +182,14 @@ void buttons_init(void)
 {
     uint64_t mask = PIN_MASK(PIN_LOCK);
     for (int i = 0; i < BUTTON_COUNT; i++) {
-        mask |= PIN_MASK(buttons[i].pin);
+        if (buttons[i].pin < EXP(0)) {
+            mask |= PIN_MASK(buttons[i].pin);
+        }
     }
     config_inputs(mask);
+    expander_init();                                        // no expander: the 5-way stays silent
     vTaskDelay(pdMS_TO_TICKS(2));                           // let the pull-ups settle
+    read_expander();
 
     // Start from the real state: something already held stays silent until released
     for (int i = 0; i < BUTTON_COUNT; i++) {
@@ -235,11 +253,11 @@ void buttons_prepare_wake(void)
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
     }
 
-    // Float the 5-way switch and the lock: their pull-ups would draw current through a
-    // closed contact all the time the device is off
+    // Float the lock: its pull-up would draw current through the closed contact all the
+    // time the device is off (the 5-way is on the expander, whose pins only conduct while
+    // pressed)
     gpio_config_t off = {
-        .pin_bit_mask = PIN_MASK(PIN_LEFT) | PIN_MASK(PIN_RIGHT) | PIN_MASK(PIN_CENTER) |
-                        PIN_MASK(PIN_LOCK),
+        .pin_bit_mask = PIN_MASK(PIN_LOCK),
         .mode = GPIO_MODE_DISABLE,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,

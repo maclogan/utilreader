@@ -124,7 +124,7 @@ The board calls global functions your `main.lua` defines. All of them are option
 | Function | Called |
 |---|---|
 | `on_open()` | The app was opened from the menu. Draw the first screen with a **full** refresh |
-| `on_button(name)` | A button press while the app is open: `"left"`, `"right"`, `"select"`, `"back"`, `"left_hold"`, `"right_hold"`. Return `false` to leave the app, `true` to stay. Returning nothing keeps the default: `"back"` leaves, the others stay |
+| `on_button(name)` | A button press while the app is open: `"left"`, `"right"`, `"select"`, `"back"`, `"left_hold"`, `"right_hold"`, `"select_hold"`. Return `false` to leave the app, `true` to stay. Returning nothing keeps the default: `"back"` leaves, the others stay. **`"select_hold"` is different:** return `true` if you handled it; otherwise the same press arrives again as `"select"`, so apps that ignore holds treat a long press as a press |
 | `on_tick()` | The time set with `app.wake_in(ms)` has come (only while the app is open) |
 | `on_background()` | About every 30 s, open or not, for apps with `"background": true` |
 | `on_close()` | The app is leaving the screen (BACK, HOME, or `app.close()`) |

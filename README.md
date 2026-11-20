@@ -12,8 +12,9 @@ switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 | **Story** | A short Chinese graded-reader story written by Claude each day, with per-word pinyin and meaning lookup and a saved-words list |
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
 | **Books** | E-book reader: chapters, reading position and progress kept per book |
+| **Music** | Plays MP3, FLAC, WAV, M4A/AAC and OGG/Opus from the microSD card to headphones (TLV320DAC3100), in the background while you use other apps |
 | **Transfer** | While open, a web page on your Wi-Fi to add/delete books and see saved words |
-| **Settings** | Set the date and time by hand; turn the screen upside down |
+| **Settings** | Set the date and time by hand; turn the screen upside down; choose the music folder |
 | **Power** | Turns the device off (hold BACK / HOME to turn it on again) |
 
 **Your own apps.** Apps can also be small Lua programs installed from the web page
@@ -27,18 +28,22 @@ where you left it (Transfer and Power are never reopened automatically).
 
 - **Board:** ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB PSRAM, 2.4 GHz Wi-Fi), 2.9"
   296×128 e-paper, LiPo charger and AXP2602 fuel gauge. Flashed over its USB-C port.
-- **You add:** a 5-way tact switch (left/right/center), a push button (BACK / HOME) and a
-  lock switch on the 14-pin header, and optionally a 3.7 V LiPo. Every control just
-  connects a pin to GND.
+- **You add:** a 5-way tact switch (left/right/center) on an I2C I/O expander (MCP23017 or
+  PCF8574), a push button (BACK / HOME) and a lock switch on the 14-pin header, and
+  optionally a 3.7 V LiPo. Every control just connects a pin to GND.
+- **For music:** an Adafruit TLV320DAC3100 (DAC + headphone amp), a microSD card in the
+  board's slot, headphones. An INMP441 microphone is wired for a future app.
 
-| Control | Header pin | GPIO |
-|---|---|---|
-| 5-way left / right / center | GP4 / GP5 / GP3 | 4 / 5 / 3 |
-| BACK / HOME (also turns on) | GP2 | 2 |
-| Lock (closed = locked) | RX | 44 |
+| Control | Connects to |
+|---|---|
+| 5-way left / right / center | Expander pin 0 / 1 / 2 (expander on header SDA / SCL) |
+| BACK / HOME (also turns on) | Header GP2 (GPIO2) |
+| Lock (closed = locked) | Header RX (GPIO44) |
 
-**[HARDWARE.md](HARDWARE.md)** has the parts list, header pinout, wiring, power and
-charging details, and the full GPIO map.
+**[HARDWARE.md](HARDWARE.md)** has the parts list, header pinout, the cable and how to
+secure it, wiring for the controls and audio modules, power and charging details, and the
+full GPIO map. Older wiring with the 5-way on GPIO3-5 no longer works: those pins carry
+audio now.
 
 ## Using it
 
@@ -49,6 +54,7 @@ charging details, and the full GPIO map.
 | 5-way **left / right** | Previous / next (moves the highlight, cursor, card...) |
 | Hold **left / right** | App-specific, e.g. previous / next page in the story |
 | **Press** the 5-way | Select / open / act |
+| **Hold** the 5-way in | App-specific (Music: switch volume / seek); elsewhere the same as a press |
 | **Lock** switch on | All controls ignored (a padlock shows on the menu) |
 
 **Off and on.** Open the **Power** tile to turn off: the screen shows a power symbol and
@@ -127,10 +133,12 @@ table).
 ```
 HARDWARE.md               parts, wiring, pinout, power
 docs/api.md               writing Lua apps: quick start, then the reference
+docs/audio.md             how music playback works: DAC, I2S, decoders, the player
 apps/                     Lua apps: the catalog, and the ones bundled with the firmware
                           (Weather, Clock)
 .github/workflows/        catalog.yml: checks apps/ and publishes the catalog to GitHub Pages
 tools/catalog.py          checks app packages; builds the catalog
+tools/tlv320_clocks.py    the DAC's clock settings for every sample rate (checks the driver)
 main/                     the launcher: start-up, main menu, event loop      (main/README.md)
 components/
   app_core/               what apps are built on: app_t interface, app registry,
@@ -138,11 +146,15 @@ components/
   app_script/             Lua apps: host, API, installing, bundled apps
   lua/                    Lua 5.4.7 interpreter (unmodified)
   display/                e-paper driver (SSD16xx), 16 px Unicode font, loading box,
-                          left title bar, wiring diagnostic; owns the peripheral rail
+                          left title bar, wiring diagnostic
+  board_power/            the switched peripheral rail, shared by the display and SD card
   buttons/                5-way switch + BACK/HOME + lock switch -> tap / hold events
+  expander/               MCP23017 / PCF8574 I2C I/O expander (5-way switch, DAC reset)
   battery/                AXP2602 fuel gauge + charge status (battery % on the main menu)
   clock_chip/             PCF85063A real-time clock: keeps the time across resets
-  i2c_bus/                the board's I2C bus, shared by the gauge and the clock chip
+  i2c_bus/                the board's I2C bus: gauge, clock chip, expander, DAC
+  sdcard/                 the microSD slot, mounted at /sdcard on demand
+  audio/                  TLV320DAC3100 headphone DAC + I2S output, PSRAM buffer
   power/                  off (deep sleep, the Power tile) and on (hold BACK/HOME)
   books/                  e-book files (shared by the web interface and the reader)
   webui/                  web server + page: pairing, book upload/convert, saved words
@@ -151,8 +163,9 @@ components/
   app_story/              Story app
   app_flashcards/         Flashcards (Cards) app
   app_reader/             Books (e-reader) app
+  app_music/              Music app: library, Now playing, player task, tag reader
   app_transfer/           Transfer app (runs the web interface while open)
-  app_settings/           Settings app (date, time, screen rotation)
+  app_settings/           Settings app (date, time, screen rotation, music folder)
 tools/make_font.py        builds the embedded font from GNU Unifont
 ```
 

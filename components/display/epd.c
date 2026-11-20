@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "sdkconfig.h"                  // CONFIG_DISPLAY_ROTATE_180
 #include "epd_pins.h"                   // PIN_* wiring
+#include "board_power.h"                // rail_acquire(), rail_release()
 
 #define EPD_SPI_HOST    SPI2_HOST
 #define EPD_SPI_HZ      (4 * 1000 * 1000)
@@ -120,8 +121,9 @@ static void check_full_refresh(int ms)
     }
 }
 
-/* Switches the shared rail on, parks the LoRa radio, and sets up GPIO + SPI. Runs on the
- * first epd_init() after boot and again after epd_power_down(). */
+/* Takes a reference on the shared rail (board_power.h, which also parks the LoRa radio) and
+ * sets up GPIO + SPI. Runs on the first epd_init() after boot and again after
+ * epd_power_down(). */
 static bool bus_ready = false;
 
 static void epd_bus_init(void)
@@ -131,21 +133,12 @@ static void epd_bus_init(void)
     }
     bus_ready = true;
 
-    // Radio chip select high before the rail comes up, so the radio never takes display
-    // traffic as its own; its reset released so it idles in standby
-    gpio_set_level(PIN_LORA_NSS, 1);
-    gpio_set_level(PIN_LORA_RST, 1);
-    gpio_set_level(PIN_PWR, 0);
+    rail_acquire();                                     /* the peripheral rail on (if not already) */
     gpio_config_t out = {
-        .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_RST) | (1ULL << PIN_PWR) |
-                        (1ULL << PIN_LORA_NSS) | (1ULL << PIN_LORA_RST),
+        .pin_bit_mask = (1ULL << PIN_DC) | (1ULL << PIN_RST),
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&out));
-    gpio_set_level(PIN_LORA_NSS, 1);
-    gpio_set_level(PIN_LORA_RST, 1);
-    gpio_set_level(PIN_PWR, 1);                         /* switch the peripheral rail on */
-    vTaskDelay(pdMS_TO_TICKS(50));                      /* let the rail settle */
     gpio_config_t in = {
         .pin_bit_mask = 1ULL << PIN_BUSY,
         .mode = GPIO_MODE_INPUT,
@@ -297,6 +290,7 @@ void epd_sleep(void)
 
 void epd_power_down(void)
 {
+    bool had_rail = bus_ready;
     if (bus_ready) {
         epd_wait_busy();
         epd_sleep();
@@ -306,18 +300,14 @@ void epd_power_down(void)
     }
     asleep = true;
 
-    // Float everything that leads to the rail (an output left high would feed the unpowered
-    // chips through their protection diodes), then let the rail's pull-down switch it off
-    static const int pins[] = {
-        PIN_MOSI, PIN_SCLK, PIN_CS, PIN_DC, PIN_RST, PIN_BUSY,
-        PIN_LORA_NSS, PIN_LORA_RST, PIN_LORA_BUSY, PIN_LORA_DIO1, PIN_SPI_MISO,
-        PIN_SD_CMD, PIN_SD_D0, PIN_SD_CLK, PIN_RGB_LED, PIN_PWR,
-    };
+    // Float the display's pins (an output left high would feed the unpowered panel through
+    // its protection diodes), then drop the display's reference on the rail: it switches off
+    // with the last user, which floats the radio, SD and LED pins too
+    static const int pins[] = {PIN_MOSI, PIN_SCLK, PIN_CS, PIN_DC, PIN_RST, PIN_BUSY};
     uint64_t mask = 0;
     for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
         mask |= 1ULL << pins[i];
     }
-    gpio_set_level(PIN_PWR, 0);
     gpio_config_t off = {
         .pin_bit_mask = mask,
         .mode = GPIO_MODE_DISABLE,
@@ -325,6 +315,9 @@ void epd_power_down(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
     };
     gpio_config(&off);
+    if (had_rail) {
+        rail_release();
+    }
 }
 
 /* ---------- drawing ---------- */
