@@ -9,8 +9,10 @@ Turning the device off stops it and remembers the place.
 | File | What it does |
 |---|---|
 | `music_app.c`, `include/music_app.h` | The `app_t`: the menu tree, Now Playing, saving and resuming |
-| `player.c/.h` | The player task: a queue of tracks -> decoder -> `components/audio`; seeking |
-| `idf_component.yml` | Pulls in Espressif's `esp_audio_codec` decoders |
+
+Playback is the shared engine in `components/player` (also used by Podcasts): Music hands it a
+queue of library tracks through its `music_source`. The list and Now Playing screens are the
+shared `media_ui` too.
 
 The library itself (scanning, tags, artists, albums, playlists) is `components/musicdb`, shared
 with the web page.

@@ -17,6 +17,9 @@
 #include "freertos/semphr.h"
 #include "musicdb.h"                    // the music library
 #include "playlists.h"
+#include "podcasts.h"                   // podcast feeds and episodes
+#include "sdcard.h"
+#include <stdarg.h>
 #include "review.h"                     // saved words
 #include "settings.h"                   // the music folder
 #include "wifi.h"                       // wifi_ip_string()
@@ -867,6 +870,266 @@ static esp_err_t playlist_delete_handler(httpd_req_t *req)
     return send_json(req, r, NULL);
 }
 
+// ---------- podcasts ----------
+
+// Streams JSON: a small buffer flushed as chunks
+typedef struct {
+    httpd_req_t *req;
+    char *buf;
+    size_t len, cap;
+} jstream_t;
+
+static void js_raw(jstream_t *j, const char *fmt, ...)
+{
+    if (j->len + 256 > j->cap) {
+        httpd_resp_send_chunk(j->req, j->buf, j->len);
+        j->len = 0;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(j->buf + j->len, j->cap - j->len, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        j->len += (size_t)n < j->cap - j->len ? (size_t)n : j->cap - j->len - 1;
+    }
+}
+
+static void js_str(jstream_t *j, const char *s)
+{
+    json_str(j->req, j->buf, &j->len, j->cap, s);
+}
+
+static void js_options(jstream_t *j, const pod_options_t *o)
+{
+    js_raw(j, "{\"keep_mode\":%d,\"keep\":%d,\"delete_played\":%d,\"after_next\":%d,\"oldest_first\":%d}",
+           o->keep_mode, o->keep, o->delete_played, o->after_next, o->oldest_first);
+}
+
+static int opt_int(const cJSON *o, const char *key, int fallback)
+{
+    const cJSON *v = cJSON_GetObjectItem(o, key);
+    return cJSON_IsNumber(v) ? v->valueint : cJSON_IsBool(v) ? cJSON_IsTrue(v) : fallback;
+}
+
+// GET /api/podcasts: defaults, the updater's status, every feed with what's on the card
+static esp_err_t podcasts_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    pod_feed_t *feeds = heap_caps_malloc(PODCASTS_MAX_FEEDS * sizeof(pod_feed_t), MALLOC_CAP_SPIRAM);
+    pod_episode_t *eps = heap_caps_malloc(PODCASTS_MAX_EPISODES * sizeof(pod_episode_t), MALLOC_CAP_SPIRAM);
+    jstream_t j = {.req = req, .cap = 4096};
+    j.buf = heap_caps_malloc(j.cap, MALLOC_CAP_SPIRAM);
+    if (!feeds || !eps || !j.buf) {
+        free(feeds);
+        free(eps);
+        free(j.buf);
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    pod_options_t d;
+    int back, fwd;
+    podcasts_defaults(&d, &back, &fwd);
+    js_raw(&j, "{\"card\":%s,\"defaults\":", sdcard_mount() ? "true" : "false");
+    js_options(&j, &d);
+    js_raw(&j, ",\"seek_back\":%d,\"seek_fwd\":%d,\"status\":", back, fwd);
+    pod_update_status_t u;
+    podcasts_update_status(&u);
+    js_raw(&j, "{\"running\":%s,\"offline\":%s,\"feed\":%d,\"feeds\":%d,\"downloading\":%d,\"percent\":%d,\"current\":",
+           u.running ? "true" : "false", u.offline ? "true" : "false", u.feed, u.feeds, u.downloading, u.percent);
+    js_str(&j, u.current);
+    js_raw(&j, ",\"message\":");
+    js_str(&j, u.message);
+    js_raw(&j, "},\"feeds\":[");
+    int nf = podcasts_feeds(feeds, PODCASTS_MAX_FEEDS);
+    for (int i = 0; i < nf; i++) {
+        const pod_feed_t *f = &feeds[i];
+        int n = podcasts_episodes(f->id, eps, PODCASTS_MAX_EPISODES), on_card = 0, unplayed = 0;
+        uint64_t bytes = 0;
+        for (int k = 0; k < n; k++) {
+            if (eps[k].flags & POD_DOWNLOADED) {
+                on_card++;
+                unplayed += !(eps[k].flags & POD_PLAYED);
+                bytes += eps[k].length;
+            }
+        }
+        js_raw(&j, "%s{\"id\":\"%s\",\"url\":", i ? "," : "", f->id);
+        js_str(&j, f->url);
+        js_raw(&j, ",\"title\":");
+        js_str(&j, f->title);
+        js_raw(&j, ",\"error\":");
+        js_str(&j, f->error);
+        js_raw(&j, ",\"last_update\":%lld,\"episodes\":%d,\"on_card\":%d,\"unplayed\":%d,\"bytes\":%llu,\"opt\":",
+               (long long)f->last_update, n, on_card, unplayed, (unsigned long long)bytes);
+        js_options(&j, &f->opt);
+        js_raw(&j, "}");
+    }
+    js_raw(&j, "]}");
+    httpd_resp_send_chunk(req, j.buf, j.len);
+    httpd_resp_send_chunk(req, NULL, 0);
+    free(feeds);
+    free(eps);
+    free(j.buf);
+    return ESP_OK;
+}
+
+// POST /api/podcasts/defaults, body {"keep_mode","keep","delete_played","after_next","oldest_first","seek_back","seek_fwd"}
+static esp_err_t podcasts_defaults_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    cJSON *j = recv_json(req);
+    if (j == NULL) {
+        return ESP_OK;
+    }
+    pod_options_t d;
+    int back, fwd;
+    podcasts_defaults(&d, &back, &fwd);
+    pod_options_t o = {
+        opt_int(j, "keep_mode", d.keep_mode), opt_int(j, "keep", d.keep), opt_int(j, "delete_played", d.delete_played),
+        opt_int(j, "after_next", d.after_next), opt_int(j, "oldest_first", d.oldest_first),
+    };
+    podcasts_set_defaults(&o, opt_int(j, "seek_back", back), opt_int(j, "seek_fwd", fwd));
+    cJSON_Delete(j);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "saved", true);
+    return send_json(req, r, NULL);
+}
+
+// POST /api/podcasts/feed: {"url"} adds a feed; {"id","opt":{...}} changes its options
+// (-1 = use the default)
+static esp_err_t podcasts_feed_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    cJSON *j = recv_json(req);
+    if (j == NULL) {
+        return ESP_OK;
+    }
+    const cJSON *url = cJSON_GetObjectItem(j, "url"), *id = cJSON_GetObjectItem(j, "id");
+    const cJSON *opt = cJSON_GetObjectItem(j, "opt");
+    char new_id[9] = "";
+    const char *err = NULL;
+    if (cJSON_IsString(url)) {
+        if (strlen(url->valuestring) >= sizeof(((pod_feed_t *)0)->url) || !podcasts_add_feed(url->valuestring, new_id)) {
+            err = "Couldn't add it: not an http(s) address, already added, too many feeds, or no card";
+        }
+    } else if (cJSON_IsString(id) && cJSON_IsObject(opt)) {
+        pod_feed_t f;
+        if (!podcasts_feed(id->valuestring, &f)) {
+            err = "No such feed";
+        } else {
+            f.opt = (pod_options_t){
+                opt_int(opt, "keep_mode", -1), opt_int(opt, "keep", -1), opt_int(opt, "delete_played", -1),
+                opt_int(opt, "after_next", -1), opt_int(opt, "oldest_first", -1),
+            };
+            podcasts_update_feed(&f);
+            snprintf(new_id, sizeof(new_id), "%s", f.id);
+        }
+    } else {
+        err = "Send {url} or {id, opt}";
+    }
+    cJSON_Delete(j);
+    if (err) {
+        return send_error(req, "400 Bad Request", err);
+    }
+    podcasts_update_start(true, NULL);                      // fetch it now (Transfer is open)
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "id", new_id);
+    return send_json(req, r, NULL);
+}
+
+// DELETE /api/podcasts/feed?id=X: the feed, its episodes and their files
+static esp_err_t podcasts_feed_delete(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[16];
+    if (!query(req, "id", id, sizeof(id)) || !podcasts_remove_feed(id)) {
+        return send_error(req, "404 Not Found", "no such feed");
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "deleted", true);
+    return send_json(req, r, NULL);
+}
+
+// GET /api/podcasts/episodes?id=X: [{"id","t","d","dur","f"}], newest first (f = flags:
+// 1 picked, 2 played, 4 on the card)
+static esp_err_t podcasts_episodes_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[16];
+    if (!query(req, "id", id, sizeof(id))) {
+        return send_error(req, "400 Bad Request", "missing id");
+    }
+    pod_episode_t *eps = heap_caps_malloc(PODCASTS_MAX_EPISODES * sizeof(pod_episode_t), MALLOC_CAP_SPIRAM);
+    jstream_t j = {.req = req, .cap = 4096};
+    j.buf = heap_caps_malloc(j.cap, MALLOC_CAP_SPIRAM);
+    if (!eps || !j.buf) {
+        free(eps);
+        free(j.buf);
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    int n = podcasts_episodes(id, eps, PODCASTS_MAX_EPISODES);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    js_raw(&j, "[");
+    for (int i = 0; i < n; i++) {
+        js_raw(&j, "%s{\"id\":\"%s\",\"t\":", i ? "," : "", eps[i].id);
+        js_str(&j, eps[i].title);
+        js_raw(&j, ",\"d\":%lld,\"dur\":%lu,\"f\":%u}", (long long)eps[i].date,
+               (unsigned long)eps[i].duration_s, eps[i].flags);
+    }
+    js_raw(&j, "]");
+    httpd_resp_send_chunk(req, j.buf, j.len);
+    httpd_resp_send_chunk(req, NULL, 0);
+    free(eps);
+    free(j.buf);
+    return ESP_OK;
+}
+
+// POST /api/podcasts/wanted?id=X, body {"ids":[episode ids]}: the custom picks
+static esp_err_t podcasts_wanted_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[16];
+    if (!query(req, "id", id, sizeof(id))) {
+        return send_error(req, "400 Bad Request", "missing id");
+    }
+    cJSON *j = recv_json(req);
+    if (j == NULL) {
+        return ESP_OK;
+    }
+    const cJSON *arr = cJSON_GetObjectItem(j, "ids");
+    int n = cJSON_IsArray(arr) ? cJSON_GetArraySize(arr) : 0;
+    const char **ids = malloc((n ? n : 1) * sizeof(char *));
+    int k = 0;
+    const cJSON *v;
+    cJSON_ArrayForEach(v, arr) {
+        if (ids && cJSON_IsString(v)) {
+            ids[k++] = v->valuestring;
+        }
+    }
+    if (ids) {
+        podcasts_set_wanted(id, ids, k);
+        podcasts_update_start(true, NULL);                  // download the picks now
+    }
+    free(ids);
+    cJSON_Delete(j);
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "picked", k);
+    return send_json(req, r, NULL);
+}
+
 // ---------- start ----------
 
 esp_err_t webui_start(void)
@@ -881,7 +1144,7 @@ esp_err_t webui_start(void)
     upload_percent = -1;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 28;
+    cfg.max_uri_handlers = 36;
     cfg.lru_purge_enable = true;                            // drop idle connections when busy
     cfg.recv_wait_timeout = 15;                             // seconds per upload read
 
@@ -914,6 +1177,12 @@ esp_err_t webui_start(void)
         {.uri = "/api/music/playlist",  .method = HTTP_GET, .handler = playlist_get},
         {.uri = "/api/music/playlist",  .method = HTTP_POST, .handler = playlist_post},
         {.uri = "/api/music/playlist",  .method = HTTP_DELETE, .handler = playlist_delete_handler},
+        {.uri = "/api/podcasts",          .method = HTTP_GET,    .handler = podcasts_get},
+        {.uri = "/api/podcasts/defaults", .method = HTTP_POST,   .handler = podcasts_defaults_post},
+        {.uri = "/api/podcasts/feed",     .method = HTTP_POST,   .handler = podcasts_feed_post},
+        {.uri = "/api/podcasts/feed",     .method = HTTP_DELETE, .handler = podcasts_feed_delete},
+        {.uri = "/api/podcasts/episodes", .method = HTTP_GET,    .handler = podcasts_episodes_get},
+        {.uri = "/api/podcasts/wanted",   .method = HTTP_POST,   .handler = podcasts_wanted_post},
     };
     for (int i = 0; i < (int)(sizeof(routes) / sizeof(routes[0])); i++) {
         httpd_register_uri_handler(handle, &routes[i]);

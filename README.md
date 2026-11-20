@@ -13,7 +13,8 @@ switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
 | **Books** | E-book reader: chapters, reading position and progress kept per book |
 | **Music** | Plays MP3, FLAC, WAV, M4A/AAC and OGG/Opus from the microSD card to headphones (TLV320DAC3100). Browse by playlist, artist, album or song, or shuffle; keeps playing while you use other apps. Playlists are made on the web page |
-| **Transfer** | While open, a web page on your Wi-Fi to add/delete books, make music playlists, and see saved words |
+| **Podcasts** | Subscribes to podcast feeds (managed on the web page) and plays the episodes like Music: per-feed keep rules, resume per episode, seek -10 s / +30 s. New episodes download while Transfer is open |
+| **Transfer** | While open, a web page on your Wi-Fi to add/delete books, make music playlists, manage podcast feeds, and see saved words; also checks podcast feeds and downloads new episodes |
 | **Settings** | Set the date and time by hand; turn the screen upside down; choose the music folder |
 | **Power** | Turns the device off (hold BACK / HOME to turn it on again) |
 
@@ -165,7 +166,12 @@ components/
   app_reader/             Books (e-reader) app
   musicdb/                the music library: tags (cached on the card), artists, albums,
                           playlists (.m3u8 in /Playlists); used by Music and the web page
-  app_music/              Music app: library menus, Now Playing, the player task
+  player/                 the playback engine (shared by Music and Podcasts) and the
+                          shared list / Now Playing screens
+  podcasts/               podcast feeds and episodes on the card, keep rules, RSS parser,
+                          the updater that downloads episodes
+  app_music/              Music app: library menus, Now Playing
+  app_podcasts/           Podcasts app
   app_transfer/           Transfer app (runs the web interface while open)
   app_settings/           Settings app (date, time, screen rotation, music folder)
 tools/make_font.py        builds the embedded font from GNU Unifont

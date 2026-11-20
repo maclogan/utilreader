@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "flashcards_app.h"
 #include "music_app.h"
+#include "podcasts_app.h"
 #include "reader_app.h"
 #include "settings_app.h"
 #include "transfer_app.h"
@@ -55,6 +56,7 @@ static void register_apps(void)
     app_registry_add(&flashcards_app, false);
     app_registry_add(&reader_app, false);
     app_registry_add(&music_app, false);
+    app_registry_add(&podcasts_app, false);
     app_script_init();                                      // Weather, Clock and any installed apps
     app_registry_add(&transfer_app, true);
     app_registry_add(&settings_app, true);

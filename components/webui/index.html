@@ -156,6 +156,26 @@
   </section>
 
   <section>
+    <h2>Podcasts</h2>
+    <p id="podinfo" class="muted">Loading…</p>
+    <div class="row">
+      <input type="text" id="podurl" class="grow" placeholder="Feed address, e.g. https://example.com/podcast.xml">
+      <button class="primary" id="podadd">Add feed</button>
+    </div>
+    <div id="podfeeds" style="margin-top:10px"></div>
+    <div id="podedit" class="form hidden"></div>
+    <p class="row" style="margin-top:10px">
+      <label>Import OPML <input type="file" id="podopml" accept=".opml,.xml,text/xml"></label>
+      <button id="podexport">Export OPML</button>
+      <span id="podstatus" class="muted"></span>
+    </p>
+    <details>
+      <summary>Defaults for every feed</summary>
+      <div id="poddefaults" class="form"></div>
+    </details>
+  </section>
+
+  <section>
     <h2>Saved words <span class="muted" id="wordcount"></span></h2>
     <div id="words" class="muted scroll">Loading…</div>
   </section>
@@ -611,7 +631,195 @@ function refresh() {
   loadBooks().catch(e => $("books").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadWords().catch(e => $("words").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadMusic().catch(e => $("musicinfo").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+  loadPodcasts().catch(e => $("podinfo").innerHTML = `<span class="err">${esc(e.message)}</span>`);
 }
+
+// ---------- podcasts ----------
+// Feeds and their rules live on the board; it fetches and downloads when the Podcasts app is
+// opened on Wi-Fi. In options, -1 means "use the default".
+let pods = { feeds: [], defaults: {} };
+const POD_OPTS = [
+  { key: "keep_mode", label: "Keep", choices: [[0, "Newest episodes"], [1, "Custom: the ones I pick"]] },
+  { key: "keep", label: "How many (newest)", number: [1, 50] },
+  { key: "delete_played", label: "When played", choices: [[1, "Delete it"], [0, "Keep it"]] },
+  { key: "after_next", label: "When an episode ends", choices: [[1, "Play the next unplayed"], [0, "Stop"]] },
+  { key: "oldest_first", label: "Order", choices: [[0, "Newest first"], [1, "Oldest first (serial shows)"]] },
+];
+const ago = t => {
+  if (!t) return "never";
+  const s = Date.now() / 1000 - t;
+  return s < 120 ? "just now" : s < 7200 ? Math.round(s / 60) + " min ago" : s < 172800 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " days ago";
+};
+
+// A form for options; withDefault adds "Default (…)" choices for per-feed overrides
+function optsForm(id, opt, withDefault) {
+  return POD_OPTS.map(o => {
+    const v = opt[o.key];
+    let input;
+    if (o.number) {
+      input = `<input type="number" min="${o.number[0]}" max="${o.number[1]}" data-k="${o.key}" ` +
+        `value="${v >= 1 ? v : ""}" placeholder="${withDefault ? "default: " + pods.defaults[o.key] : ""}">`;
+    } else {
+      const dflt = withDefault ? (o.choices.find(c => c[0] === pods.defaults[o.key]) || [0, "?"])[1] : "";
+      input = `<select data-k="${o.key}">` + (withDefault ? `<option value="-1">Default (${esc(dflt)})</option>` : "") +
+        o.choices.map(c => `<option value="${c[0]}" ${c[0] === v ? "selected" : ""}>${esc(c[1])}</option>`).join("") + `</select>`;
+    }
+    return `<div class="field"><label>${o.label}</label>${input}</div>`;
+  }).join("");
+}
+
+function readOpts(el) {
+  const o = {};
+  el.querySelectorAll("[data-k]").forEach(i => { o[i.dataset.k] = i.value === "" ? -1 : +i.value; });
+  return o;
+}
+
+async function loadPodcasts() {
+  pods = await getJSON("/api/podcasts");
+  const st = pods.status;
+  let info = pods.card ? `${pods.feeds.length} feed${pods.feeds.length === 1 ? "" : "s"}. ` +
+    "The board checks them and downloads new episodes while the Transfer app is open (like now)." : "No microSD card in the board.";
+  if (st.running) info += st.downloading ? ` Downloading "${st.current}" ${st.percent >= 0 ? st.percent + "%" : ""} (${st.downloading} left).`
+                                         : ` Checking feeds (${st.feed} of ${st.feeds}).`;
+  else if (st.message) info += " Last problem: " + st.message;
+  $("podinfo").textContent = info;
+  $("podfeeds").innerHTML = pods.feeds.length ? `<table><tr><th>Podcast</th><th class="num">On the card</th><th>Checked</th><th></th></tr>` +
+    pods.feeds.map(f => `<tr><td>${esc(f.title || f.url)}${f.title ? "" : ' <span class="muted">(being fetched)</span>'}` +
+      (f.error ? `<br><span class="err">${esc(f.error)}</span>` : "") + `</td>` +
+      `<td class="num">${f.on_card} (${f.unplayed} new)<br><span class="muted">${kb(f.bytes)}</span></td>` +
+      `<td class="muted">${ago(f.last_update)}</td><td class="num" style="white-space:nowrap">` +
+      `<button class="small" data-edit="${f.id}">Edit</button> <button class="small danger" data-del="${f.id}">Remove</button></td></tr>`).join("") +
+    `</table>` : `<p class="muted">No feeds yet: paste a feed address above, or import an OPML file from another podcast app.</p>`;
+  $("podfeeds").querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editFeed(b.dataset.edit));
+  $("podfeeds").querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    const f = pods.feeds.find(x => x.id === b.dataset.del);
+    if (!confirm(`Remove "${f.title || f.url}" and delete its episodes from the card?`)) return;
+    await api("/api/podcasts/feed?id=" + f.id, { method: "DELETE" }).catch(() => {});
+    $("podedit").classList.add("hidden");
+    loadPodcasts();
+  });
+  // Defaults
+  $("poddefaults").innerHTML = optsForm("d", pods.defaults, false) +
+    `<div class="field"><label>Seek back (seconds)</label><input type="number" min="1" max="600" id="podback" value="${pods.seek_back}"></div>` +
+    `<div class="field"><label>Seek ahead (seconds)</label><input type="number" min="1" max="600" id="podfwd" value="${pods.seek_fwd}"></div>` +
+    `<button class="primary" id="podsavedefaults">Save defaults</button> <span id="poddefstatus" class="muted"></span>`;
+  $("podsavedefaults").onclick = async () => {
+    const o = readOpts($("poddefaults"));
+    o.seek_back = +$("podback").value || 10;
+    o.seek_fwd = +$("podfwd").value || 30;
+    const r = await api("/api/podcasts/defaults", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
+    $("poddefstatus").textContent = r.ok ? "Saved" : "Couldn't save";
+    if (r.ok) loadPodcasts();
+  };
+}
+
+async function addFeed(url) {
+  const r = await api("/api/podcasts/feed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+}
+
+$("podadd").onclick = async () => {
+  const url = $("podurl").value.trim();
+  if (!/^https?:\/\//i.test(url)) { $("podstatus").textContent = "Paste the feed's address (starting with http)"; return; }
+  try { await addFeed(url); $("podurl").value = ""; $("podstatus").textContent = "Added: the board is fetching it now"; }
+  catch (e) { $("podstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  loadPodcasts();
+};
+
+async function editFeed(id) {
+  const f = pods.feeds.find(x => x.id === id);
+  const box = $("podedit");
+  box.classList.remove("hidden");
+  box.innerHTML = `<h3>${esc(f.title || f.url)}</h3><p class="muted" style="word-break:break-all">${esc(f.url)}</p>` +
+    `<div id="podopts">${optsForm("f", f.opt, true)}</div><div id="podpick"></div>` +
+    `<div class="row" style="margin-top:10px"><button class="primary" id="podsave">Save</button><button id="podclose">Close</button>` +
+    `<span id="podeditstatus" class="muted"></span></div>`;
+  const pickEl = $("podpick");
+  let episodes = null;
+  const custom = () => {
+    const m = +box.querySelector('[data-k="keep_mode"]').value;
+    return m === 1 || (m === -1 && pods.defaults.keep_mode === 1);
+  };
+  const drawPick = async () => {
+    if (!custom()) { pickEl.innerHTML = ""; return; }
+    if (!episodes) {
+      pickEl.innerHTML = '<p class="muted">Loading episodes…</p>';
+      episodes = await getJSON("/api/podcasts/episodes?id=" + id);
+    }
+    if (!episodes.length) { pickEl.innerHTML = '<p class="muted">No episodes known yet: the board is fetching the feed; reload this page in a moment.</p>'; return; }
+    pickEl.innerHTML = `<h3>Episodes to keep on the card</h3>` +
+      `<div class="row"><input type="text" id="podsearch" class="grow" placeholder="Search episodes">` +
+      `<button class="small" id="podnewest">Tick newest 50</button><button class="small" id="podall">Tick all</button>` +
+      `<button class="small" id="podnone">Untick all</button></div><p id="podpicked" class="muted"></p><div id="podeps" class="scroll"></div>`;
+    const counts = () => { $("podpicked").textContent = `${episodes.filter(e => e.f & 1).length} of ${episodes.length} picked`; };
+    const list = () => {
+      const q = $("podsearch").value.trim().toLowerCase();
+      $("podeps").innerHTML = `<table>` + episodes.filter(e => !q || e.t.toLowerCase().includes(q)).map(e =>
+        `<tr><td><input type="checkbox" data-ep="${e.id}" ${e.f & 1 ? "checked" : ""}></td><td>${esc(e.t)}` +
+        `${e.f & 2 ? ' <span class="muted">(played)</span>' : ""}${e.f & 4 ? ' <span class="badge">on card</span>' : ""}</td>` +
+        `<td class="num muted">${e.d ? new Date(e.d * 1000).toLocaleDateString() : ""}</td>` +
+        `<td class="num muted">${e.dur ? Math.round(e.dur / 60) + " min" : ""}</td></tr>`).join("") + `</table>`;
+      $("podeps").querySelectorAll("[data-ep]").forEach(c => c.onchange = () => {
+        const e = episodes.find(x => x.id === c.dataset.ep);
+        e.f = c.checked ? e.f | 1 : e.f & ~1;
+        counts();
+      });
+      counts();
+    };
+    $("podsearch").oninput = list;
+    $("podnewest").onclick = () => { episodes.forEach((e, i) => { e.f = i < 50 ? e.f | 1 : e.f & ~1; }); list(); };
+    $("podall").onclick = () => { episodes.forEach(e => { e.f |= 1; }); list(); };
+    $("podnone").onclick = () => { episodes.forEach(e => { e.f &= ~1; }); list(); };
+    list();
+  };
+  box.querySelector('[data-k="keep_mode"]').onchange = drawPick;
+  drawPick();
+  $("podclose").onclick = () => box.classList.add("hidden");
+  $("podsave").onclick = async () => {
+    $("podeditstatus").textContent = "Saving…";
+    try {
+      let r = await api("/api/podcasts/feed", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, opt: readOpts($("podopts")) }) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (custom() && episodes) {
+        r = await api("/api/podcasts/wanted?id=" + id, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: episodes.filter(e => e.f & 1).map(e => e.id) }) });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+      }
+      $("podeditstatus").textContent = "Saved: the board is applying it now";
+      loadPodcasts();
+    } catch (e) {
+      $("podeditstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+    }
+  };
+}
+
+$("podopml").onchange = async () => {
+  const file = $("podopml").files[0];
+  if (!file) return;
+  const doc = new DOMParser().parseFromString(await file.text(), "text/xml");
+  const urls = [...doc.querySelectorAll("outline[xmlUrl]")].map(o => o.getAttribute("xmlUrl")).filter(u => /^https?:/i.test(u));
+  let added = 0, failed = 0;
+  for (const u of urls) {
+    $("podstatus").textContent = `Importing ${added + failed + 1} of ${urls.length}…`;
+    try { await addFeed(u); added++; } catch { failed++; }
+  }
+  $("podstatus").textContent = `Imported ${added} feed${added === 1 ? "" : "s"}` + (failed ? ` (${failed} skipped: already there or not valid)` : "");
+  $("podopml").value = "";
+  loadPodcasts();
+};
+
+$("podexport").onclick = () => {
+  const xesc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const body = pods.feeds.map(f => `    <outline type="rss" text="${xesc(f.title || f.url)}" title="${xesc(f.title || f.url)}" xmlUrl="${xesc(f.url)}"/>`).join("\n");
+  const opml = `<?xml version="1.0" encoding="UTF-8"?>\n<opml version="2.0">\n  <head><title>Podcasts</title></head>\n  <body>\n${body}\n  </body>\n</opml>\n`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([opml], { type: "text/x-opml" }));
+  a.download = "podcasts.opml";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
 
 // ---------- music: playlists ----------
 // The board sends its whole library once ([title, artist, album, seconds] per track; the

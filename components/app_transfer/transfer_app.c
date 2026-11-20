@@ -15,7 +15,9 @@
 
 #include <stdio.h>                      // snprintf()
 #include <string.h>
+#include "buttons.h"                    // buttons_post()
 #include "epd.h"                  // drawing
+#include "podcasts.h"                   // the podcast updater runs while Transfer is open
 #include "font16.h"                     // activity text can be Chinese (book titles)
 #include "webui.h"                      // the web server
 #include "wifi.h"                       // wifi_ip_string()
@@ -24,6 +26,37 @@
 
 static webui_status_t shown;            // what's on screen, to redraw only on changes
 static char shown_ip[20];
+static char shown_pod[96];
+
+// The podcast updater runs only while Transfer is open (Wi-Fi is busy then anyway, and no
+// downloads compete with playback otherwise). Its progress, one line.
+static void podcast_line(char *out, size_t size)
+{
+    pod_update_status_t u;
+    podcasts_update_status(&u);
+    if (u.running && u.downloading > 0) {
+        if (u.percent >= 0) {
+            snprintf(out, size, "Podcasts: downloading %d%% (%d left)", u.percent, u.downloading);
+        } else {
+            snprintf(out, size, "Podcasts: downloading (%d left)", u.downloading);
+        }
+    } else if (u.running && u.feeds) {
+        snprintf(out, size, "Podcasts: checking feed %d of %d", u.feed, u.feeds);
+    } else if (u.running) {
+        snprintf(out, size, "Podcasts: updating");
+    } else if (u.offline) {
+        snprintf(out, size, "Podcasts: no Wi-Fi");
+    } else if (u.message[0]) {
+        snprintf(out, size, "Podcasts: %.70s", u.message);
+    } else {
+        snprintf(out, size, "Podcasts: up to date");
+    }
+}
+
+static void wake_main_loop(void)
+{
+    buttons_post(BUTTON_WAKE);                              // from the updater's task
+}
 
 static void centered(int y, const char *text, int scale)
 {
@@ -38,6 +71,7 @@ static void draw(bool full)
     bool online = wifi_ip_string(ip, sizeof(ip));
     shown = st;
     memcpy(shown_ip, ip, sizeof(shown_ip));
+    podcast_line(shown_pod, sizeof(shown_pod));
 
     if (!full && !epd_is_awake()) {
         full = true;
@@ -88,7 +122,8 @@ static void draw(bool full)
         } else {
             epd_draw_text(MARGIN, 72, "Waiting for a browser", 1, EPD_BLACK);
         }
-        centered(108, "BACK: stop sharing", 1);
+        epd_draw_text(MARGIN, 94, shown_pod, 1, EPD_BLACK);
+        centered(112, "BACK: stop sharing", 1);
     }
 
     if (full) {
@@ -101,6 +136,7 @@ static void draw(bool full)
 static void transfer_open(const app_t *self)
 {
     webui_start();
+    podcasts_update_start(true, wake_main_loop);           // check feeds, download episodes
     draw(true);
 }
 
@@ -120,8 +156,10 @@ static bool transfer_button(const app_t *self, button_event_t event)
         webui_status_t st;
         webui_status(&st);
         bool code_changed = st.code_live != shown.code_live || strcmp(st.code, shown.code) != 0;
+        char pod[96];
+        podcast_line(pod, sizeof(pod));
         if (code_changed || st.upload_percent != shown.upload_percent
-            || strcmp(st.activity, shown.activity) != 0) {
+            || strcmp(st.activity, shown.activity) != 0 || strcmp(pod, shown_pod) != 0) {
             draw(code_changed);                             // the code screen is a whole new screen
         }
     }
@@ -153,6 +191,7 @@ static void transfer_background(const app_t *self)
 
 static void transfer_close(const app_t *self)
 {
+    podcasts_update_stop();                                 // a partial download resumes next time
     webui_stop();
 }
 

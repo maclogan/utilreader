@@ -15,6 +15,6 @@ dependencies:
     version: 5.5.1
 direct_dependencies:
 - espressif/esp_audio_codec
-manifest_hash: 3117544843b9791cbb5535cf7cefd7642f4deb950c5747e196f67b6609509876
+manifest_hash: 3f0af7a52d9f075df68762fcdbc536a021ec3e50af16524dec990f852511e246
 target: esp32s3
 version: 2.0.0

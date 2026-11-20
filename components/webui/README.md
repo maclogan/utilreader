@@ -52,6 +52,12 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `GET /api/music/playlist?file=F` | `{"file","name","items":[ids],"missing","gen"}` |
 | `POST /api/music/playlist` | Body `{"name","file" (being replaced, or ""),"gen","items":[ids]}` → `{"file"}`; 409 if the library was rescanned meanwhile |
 | `DELETE /api/music/playlist?file=F` | Delete a playlist (not the songs) |
+| `GET /api/podcasts` | `{"card","defaults","seek_back","seek_fwd","status","feeds":[{"id","url","title","error","last_update","episodes","on_card","unplayed","bytes","opt"}]}` (streamed). `opt` / `defaults`: `keep_mode` (0 newest, 1 custom), `keep`, `delete_played`, `after_next`, `oldest_first`; -1 in `opt` = the default |
+| `POST /api/podcasts/defaults` | Body: the default options plus `seek_back`, `seek_fwd` (seconds) |
+| `POST /api/podcasts/feed` | `{"url"}` adds a feed (fetched on the next update); `{"id","opt"}` changes its options → `{"id"}` |
+| `DELETE /api/podcasts/feed?id=ID` | Remove a feed with its episodes and files |
+| `GET /api/podcasts/episodes?id=ID` | `[{"id","t","d","dur","f"}]` newest first (streamed); `f` flags: 1 picked, 2 played, 4 on the card |
+| `POST /api/podcasts/wanted?id=ID` | Body `{"ids":[...]}`: the episodes picked in Custom mode |
 
 ## The app catalog
 

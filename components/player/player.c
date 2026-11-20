@@ -15,7 +15,6 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "impl/esp_m4a_dec.h"
-#include "musicdb.h"
 
 static const char *TAG = "player";
 
@@ -32,6 +31,7 @@ typedef struct {
     uint32_t ms;                                    // PLAY: start; SEEK: target
     int *tracks;                                    // PLAY: the new queue (the player frees it)
     int count;
+    const player_source_t *source;                  // PLAY: whose items they are
 } cmd_t;
 
 // What to do after a track: play queue position `index` from `ms`, or stop (index -1)
@@ -51,8 +51,9 @@ static void (*notify_cb)(void);
 static uint8_t *in_buf, *out_buf;
 static uint32_t out_size;
 
-static int *q;                                      // the queue: library track indices
+static int *q;                                      // the queue: item ids for `src`
 static volatile int qlen;
+static const player_source_t *src;
 
 // Takes over a PLAY command's queue
 static void install_queue(cmd_t *c)
@@ -60,6 +61,7 @@ static void install_queue(cmd_t *c)
     int *old = q;
     q = c->tracks;
     qlen = c->count;
+    src = c->source;
     free(old);
     c->tracks = NULL;
 }
@@ -122,9 +124,9 @@ static void send(cmd_kind_t kind, int index, uint32_t ms)
     xQueueSend(queue, &c, portMAX_DELAY);
 }
 
-void player_play_queue(const int *tracks, int count, int pos, uint32_t start_ms)
+void player_play_queue(const player_source_t *source, const int *tracks, int count, int pos, uint32_t start_ms)
 {
-    if (count <= 0) {
+    if (count <= 0 || source == NULL) {
         return;
     }
     int *copy = heap_caps_malloc(count * sizeof(int), MALLOC_CAP_SPIRAM);
@@ -132,7 +134,7 @@ void player_play_queue(const int *tracks, int count, int pos, uint32_t start_ms)
         return;
     }
     memcpy(copy, tracks, count * sizeof(int));
-    cmd_t c = {.kind = CMD_PLAY, .index = pos, .ms = start_ms, .tracks = copy, .count = count};
+    cmd_t c = {.kind = CMD_PLAY, .index = pos, .ms = start_ms, .tracks = copy, .count = count, .source = source};
     xQueueSend(queue, &c, portMAX_DELAY);
 }
 void player_toggle_pause(void) { send(CMD_PAUSE, 0, 0); }
@@ -315,19 +317,26 @@ static next_t play_track(int index, uint32_t start_ms)
 {
     next_t next = {.index = -1};
     int track = q[index];
-    const musicdb_track_t *t = musicdb_track(track);
-    char path[400];
-    musicdb_path(track, path, sizeof(path));
+    static player_item_t item;                      // big: not on the stack
+    memset(&item, 0, sizeof(item));
+    if (!src->get(track, &item)) {
+        return (next_t){.index = index + 1, .ms = PLAYER_ITEM_START};
+    }
+    if (start_ms == PLAYER_ITEM_START) {
+        start_ms = item.start_ms == PLAYER_ITEM_START ? 0 : item.start_ms;
+    }
+    const char *path = item.path;
     stream_t s = {0};
 
     lock();
     memset(&st, 0, sizeof(st));
     st.index = track;
+    st.source = src;
     st.queue_pos = index;
     st.queue_len = qlen;
-    snprintf(st.title, sizeof(st.title), "%s", t->title);
-    snprintf(st.artist, sizeof(st.artist), "%s", musicdb_artist_of(track));
-    snprintf(st.album, sizeof(st.album), "%s", t->album);
+    snprintf(st.title, sizeof(st.title), "%s", item.title);
+    snprintf(st.artist, sizeof(st.artist), "%s", item.artist);
+    snprintf(st.album, sizeof(st.album), "%s", item.album);
     base_ms = start_ms;
     seeking = false;
     unlock();
@@ -335,7 +344,7 @@ static next_t play_track(int index, uint32_t start_ms)
     if (!media_info_read(path, &s.info) || (s.f = fopen(path, "rb")) == NULL) {
         set_message("Can't open the file");
         notify();
-        return (next_t){.index = index + 1};
+        return (next_t){.index = index + 1, .ms = PLAYER_ITEM_START};
     }
     lock();
     st.duration_ms = s.info.duration_ms;
@@ -350,7 +359,7 @@ static next_t play_track(int index, uint32_t start_ms)
         fclose(s.f);
         set_message("Can't decode this file");
         notify();
-        return (next_t){.index = index + 1};
+        return (next_t){.index = index + 1, .ms = PLAYER_ITEM_START};
     }
     audio_flush();
     seek_stream(&s, start_ms);
@@ -396,7 +405,10 @@ static next_t play_track(int index, uint32_t start_ms)
                 }
                 if (st.duration_ms && c.ms + 1000 >= st.duration_ms) {
                     audio_flush();
-                    next = (next_t){.index = index + 1};    // past the end: next track
+                    if (src->finished) {
+                        src->finished(track);               // skipped past the end counts as played
+                    }
+                    next = (next_t){.index = src->advance ? index + 1 : -1, .ms = PLAYER_ITEM_START};
                     goto done;
                 }
                 audio_flush();
@@ -410,11 +422,12 @@ static next_t play_track(int index, uint32_t start_ms)
             }
             switch (c.kind) {
             case CMD_PLAY: install_queue(&c); next = (next_t){c.index, c.ms}; break;
-            case CMD_NEXT: next = (next_t){index + 1, 0}; break;
+            case CMD_NEXT: next = (next_t){index + 1, PLAYER_ITEM_START}; break;
             case CMD_PREV: {
                 player_status_t now;
                 player_status(&now);
-                next = now.elapsed_ms > PREV_RESTART_MS || index == 0 ? (next_t){index, 0} : (next_t){index - 1, 0};
+                next = now.elapsed_ms > PREV_RESTART_MS || index == 0 ? (next_t){index, 0}
+                                                                       : (next_t){index - 1, PLAYER_ITEM_START};
                 break;
             }
             default: next = (next_t){-1, 0}; break;          // STOP
@@ -530,9 +543,16 @@ static next_t play_track(int index, uint32_t start_ms)
 
     // End of the track (or a problem)
     audio_drain();
-    next = (next_t){.index = index + 1};
+    next = (next_t){.index = index + 1, .ms = PLAYER_ITEM_START};
     if (failed) {
         notify();
+    } else {
+        if (src->finished) {
+            src->finished(track);
+        }
+        if (!src->advance) {
+            next.index = -1;                                // one item, then stop
+        }
     }
 done:
     esp_audio_simple_dec_close(s.dec);
