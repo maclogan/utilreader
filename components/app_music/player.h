@@ -1,10 +1,11 @@
 /*
- * The music player engine: a background task that reads a track from the SD card, decodes it
- * (esp_audio_codec) and feeds components/audio, then moves on to the next track in the
- * library. Commands come from the main task and return at once; the task posts a
+ * The music player engine: a background task that plays a queue of library tracks (an album,
+ * an artist's songs, a playlist, all songs, shuffled songs): it reads each from the SD card,
+ * decodes it (esp_audio_codec) and feeds components/audio. It keeps going while other apps
+ * are on screen. Commands come from the main task and return at once; the task posts a
  * notification when something the screen shows changes.
  *
- * The library (library.h) must not be rescanned while a track is playing: stop first.
+ * The library (musicdb.h) must not be rescanned while a track is playing: stop first.
  */
 #pragma once
 
@@ -14,6 +15,7 @@
 
 typedef struct {
     int index;                          // track in the library, -1 = nothing loaded
+    int queue_pos, queue_len;           // "3 of 12"
     bool paused;
     uint32_t elapsed_ms;                // seek target while a seek is in progress
     uint32_t duration_ms;               // 0 = unknown
@@ -30,7 +32,11 @@ typedef struct {
 // way the screen should show: new track, pause, end of the list, an error.
 void player_init(void (*notify)(void));
 
-void player_play(int index, uint32_t start_ms);
+// Plays tracks[pos] (library indices; copied), then the rest of the list
+void player_play_queue(const int *tracks, int count, int pos, uint32_t start_ms);
+
+// The queue being played (valid until the next player_play_queue); *count set
+const int *player_queue(int *count);
 void player_toggle_pause(void);
 void player_seek(int delta_ms);         // relative to the current position
 void player_next(void);

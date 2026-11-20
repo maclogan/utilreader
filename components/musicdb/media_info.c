@@ -158,7 +158,12 @@ static uint32_t read_id3v2(FILE *f, uint32_t pos, media_info_t *m)
         }
         char *dst = NULL;
         size_t dsize = 0;
-        if (!memcmp(fh, ver == 2 ? "TT2" : "TIT2", ver == 2 ? 3 : 4)) { dst = m->title; dsize = sizeof(m->title); }
+        char num[16] = "";
+        uint16_t *num_dst = NULL;
+        if (!memcmp(fh, ver == 2 ? "TRK" : "TRCK", ver == 2 ? 3 : 4)) { dst = num; dsize = sizeof(num); num_dst = &m->track; }
+        else if (!memcmp(fh, ver == 2 ? "TPA" : "TPOS", ver == 2 ? 3 : 4)) { dst = num; dsize = sizeof(num); num_dst = &m->disc; }
+        else if (!memcmp(fh, ver == 2 ? "TP2" : "TPE2", ver == 2 ? 3 : 4)) { dst = m->album_artist; dsize = sizeof(m->album_artist); }
+        else if (!memcmp(fh, ver == 2 ? "TT2" : "TIT2", ver == 2 ? 3 : 4)) { dst = m->title; dsize = sizeof(m->title); }
         else if (!memcmp(fh, ver == 2 ? "TP1" : "TPE1", ver == 2 ? 3 : 4)) { dst = m->artist; dsize = sizeof(m->artist); }
         else if (!memcmp(fh, ver == 2 ? "TAL" : "TALB", ver == 2 ? 3 : 4)) { dst = m->album; dsize = sizeof(m->album); }
         bool plain = ver == 2 || (fh[9] & (ver == 4 ? 0x0E : 0xC0)) == 0;   // not compressed / encrypted
@@ -166,6 +171,9 @@ static uint32_t read_id3v2(FILE *f, uint32_t pos, media_info_t *m)
             size_t n = fs < MAX_TEXT_FRAME ? fs : MAX_TEXT_FRAME;
             if (read_at(f, p + hl, buf, n)) {
                 id3_text(dst, dsize, buf, n);
+                if (num_dst) {
+                    *num_dst = (uint16_t)atoi(num);         // "3/12" -> 3
+                }
             }
         }
         p += hl + fs;
@@ -215,6 +223,13 @@ static void vorbis_comments(const uint8_t *d, size_t n, media_info_t *m)
             if (kl == 5 && !strncasecmp(c, "TITLE", 5) && !m->title[0]) set_utf8(m->title, sizeof(m->title), v, vl);
             else if (kl == 6 && !strncasecmp(c, "ARTIST", 6) && !m->artist[0]) set_utf8(m->artist, sizeof(m->artist), v, vl);
             else if (kl == 5 && !strncasecmp(c, "ALBUM", 5) && !m->album[0]) set_utf8(m->album, sizeof(m->album), v, vl);
+            else if (((kl == 11 && !strncasecmp(c, "ALBUMARTIST", 11)) || (kl == 12 && !strncasecmp(c, "ALBUM ARTIST", 12))) &&
+                     !m->album_artist[0]) set_utf8(m->album_artist, sizeof(m->album_artist), v, vl);
+            else if ((kl == 11 && !strncasecmp(c, "TRACKNUMBER", 11)) || (kl == 10 && !strncasecmp(c, "DISCNUMBER", 10))) {
+                char num[16];
+                set_utf8(num, sizeof(num), v, vl < 15 ? vl : 15);
+                *(kl == 11 ? &m->track : &m->disc) = (uint16_t)atoi(num);
+            }
         }
         p += len;
     }
@@ -403,6 +418,24 @@ static void m4a_atoms(FILE *f, uint32_t start, uint32_t end, int depth, media_in
             }
         } else if (!memcmp(t, "mdat", 4)) {
             m->audio_offset = body;
+        } else if ((!memcmp(t, "trkn", 4) || !memcmp(t, "disk", 4)) && depth >= 2) {
+            uint8_t d[24];                                          // data atom: 16 header bytes, then 0, n, total
+            if (read_at(f, body, d, 20) && !memcmp(d + 4, "data", 4)) {
+                *(t[0] == 't' ? &m->track : &m->disc) = (uint16_t)((d[18] << 8) | d[19]);
+            }
+        } else if (!memcmp(t, "aART", 4) && depth >= 2 && !m->album_artist[0]) {
+            uint8_t d[16];
+            if (read_at(f, body, d, 16) && !memcmp(d + 4, "data", 4)) {
+                uint32_t dl = be32(d);
+                if (dl > 16 && dl <= body_end - body) {
+                    size_t n = dl - 16 < MAX_TEXT_FRAME ? dl - 16 : MAX_TEXT_FRAME;
+                    uint8_t *v = malloc(n);
+                    if (v && read_at(f, body + 16, v, n)) {
+                        set_utf8(m->album_artist, sizeof(m->album_artist), v, n);
+                    }
+                    free(v);
+                }
+            }
         } else if ((uint8_t)t[0] == 0xA9 && depth >= 2) {            // ©nam ©ART ©alb
             char *dst = !memcmp(t + 1, "nam", 3) ? m->title : !memcmp(t + 1, "ART", 3) ? m->artist :
                         !memcmp(t + 1, "alb", 3) ? m->album : NULL;

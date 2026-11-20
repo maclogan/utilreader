@@ -15,7 +15,10 @@
 #include "esp_timer.h"                  // esp_timer_get_time(): code expiry
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "musicdb.h"                    // the music library
+#include "playlists.h"
 #include "review.h"                     // saved words
+#include "settings.h"                   // the music folder
 #include "wifi.h"                       // wifi_ip_string()
 
 static const char *TAG = "webui";
@@ -638,6 +641,232 @@ static esp_err_t pair_verify_post(httpd_req_t *req)
     return send_json(req, j, NULL);
 }
 
+// ---------- music: the library and playlists (musicdb) ----------
+
+// %XX and + decoded in place (query values arrive URL-encoded)
+static void url_decode(char *s)
+{
+    char *o = s;
+    for (char *p = s; *p; p++) {
+        if (*p == '%' && p[1] && p[2]) {
+            char hex[3] = {p[1], p[2], 0};
+            *o++ = (char)strtol(hex, NULL, 16);
+            p += 2;
+        } else {
+            *o++ = *p == '+' ? ' ' : *p;
+        }
+    }
+    *o = '\0';
+}
+
+// Scans the library if nothing has been scanned yet (no track can be playing then)
+static musicdb_status_t music_ready(void)
+{
+    if (musicdb_status() == MUSICDB_NOT_SCANNED) {
+        char dir[64];
+        settings_get_str(SETTING_MUSIC_DIR, dir, sizeof(dir), SETTING_MUSIC_DIR_DEFAULT);
+        musicdb_scan(dir, NULL);
+    }
+    return musicdb_status();
+}
+
+// Appends s as a JSON string to buf (len, cap); flushes a chunk when it fills
+static void json_str(httpd_req_t *req, char *buf, size_t *len, size_t cap, const char *s)
+{
+    if (*len + 8 + strlen(s) * 6 > cap) {
+        httpd_resp_send_chunk(req, buf, *len);
+        *len = 0;
+    }
+    buf[(*len)++] = '"';
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            buf[(*len)++] = '\\';
+            buf[(*len)++] = *p;
+        } else if (*p < 0x20) {
+            *len += sprintf(buf + *len, "\\u%04x", *p);
+        } else {
+            buf[(*len)++] = *p;
+        }
+    }
+    buf[(*len)++] = '"';
+}
+
+// GET /api/music: {"status","dir","gen","songs":[[title, artist, album, seconds], ...]}
+// The array position is the track's id for the playlist calls. Streamed: big libraries
+// don't fit cJSON in RAM.
+static esp_err_t music_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    musicdb_lock();
+    static const char *names[] = {"ok", "no_card", "no_folder", "empty", "not_scanned"};
+    musicdb_status_t s = music_ready();
+    const size_t cap = 4096;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (buf == NULL) {
+        musicdb_unlock();
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    size_t len = sprintf(buf, "{\"status\":\"%s\",\"gen\":%lu,\"dir\":", names[s], (unsigned long)musicdb_generation());
+    json_str(req, buf, &len, cap, musicdb_dir());
+    len += sprintf(buf + len, ",\"songs\":[");
+    for (int i = 0; i < musicdb_count(); i++) {
+        const musicdb_track_t *t = musicdb_track(i);
+        if (len + 64 > cap) {
+            httpd_resp_send_chunk(req, buf, len);
+            len = 0;
+        }
+        len += sprintf(buf + len, "%s[", i ? "," : "");
+        json_str(req, buf, &len, cap, t->title);
+        buf[len++] = ',';
+        json_str(req, buf, &len, cap, musicdb_artist_of(i));
+        buf[len++] = ',';
+        json_str(req, buf, &len, cap, t->album);
+        len += sprintf(buf + len, ",%lu]", (unsigned long)(t->duration_ms / 1000));
+    }
+    len += sprintf(buf + len, "]}");
+    httpd_resp_send_chunk(req, buf, len);
+    httpd_resp_send_chunk(req, NULL, 0);
+    free(buf);
+    musicdb_unlock();
+    return ESP_OK;
+}
+
+// GET /api/music/playlists: [{"file","name","tracks"}]
+static esp_err_t playlists_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    playlist_info_t *list = heap_caps_malloc(PLAYLISTS_MAX * sizeof(playlist_info_t), MALLOC_CAP_SPIRAM);
+    if (list == NULL) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    int n = playlists_list(list, PLAYLISTS_MAX);
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "file", list[i].file);
+        cJSON_AddStringToObject(o, "name", list[i].name);
+        cJSON_AddNumberToObject(o, "tracks", list[i].tracks);
+        cJSON_AddItemToArray(arr, o);
+    }
+    free(list);
+    return send_json(req, arr, NULL);
+}
+
+// GET /api/music/playlist?file=X: {"file","name","items":[track ids],"missing":n}
+static esp_err_t playlist_get(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char file[160];
+    if (!query(req, "file", file, sizeof(file))) {
+        return send_error(req, "400 Bad Request", "missing file");
+    }
+    url_decode(file);
+    int *items = heap_caps_malloc(PLAYLIST_MAX_TRACKS * sizeof(int), MALLOC_CAP_SPIRAM);
+    if (items == NULL) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    musicdb_lock();
+    music_ready();
+    int missing = 0;
+    int n = playlist_load(file, items, PLAYLIST_MAX_TRACKS, &missing);
+    musicdb_unlock();
+    if (n < 0) {
+        free(items);
+        return send_error(req, "404 Not Found", "no such playlist");
+    }
+    playlist_info_t info[1] = {0};                          // the display name, from the list
+    snprintf(info[0].name, sizeof(info[0].name), "%.*s", (int)sizeof(info[0].name) - 1, file);
+    playlist_info_t *all = heap_caps_malloc(PLAYLISTS_MAX * sizeof(playlist_info_t), MALLOC_CAP_SPIRAM);
+    if (all) {
+        int c = playlists_list(all, PLAYLISTS_MAX);
+        for (int i = 0; i < c; i++) {
+            if (!strcmp(all[i].file, file)) {
+                info[0] = all[i];
+            }
+        }
+        free(all);
+    }
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "file", file);
+    cJSON_AddStringToObject(j, "name", info[0].name);
+    cJSON_AddItemToObject(j, "items", cJSON_CreateIntArray(items, n));
+    cJSON_AddNumberToObject(j, "missing", missing);
+    cJSON_AddNumberToObject(j, "gen", musicdb_generation());
+    free(items);
+    return send_json(req, j, NULL);
+}
+
+// POST /api/music/playlist, body {"name","file" (the one being replaced, or ""),"gen","items":[ids]}
+static esp_err_t playlist_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    cJSON *j = recv_json(req);
+    if (j == NULL) {
+        return ESP_OK;
+    }
+    const cJSON *name = cJSON_GetObjectItem(j, "name"), *old = cJSON_GetObjectItem(j, "file");
+    const cJSON *gen = cJSON_GetObjectItem(j, "gen"), *items = cJSON_GetObjectItem(j, "items");
+    if (!cJSON_IsString(name) || !name->valuestring[0] || strlen(name->valuestring) > 60 ||
+        !cJSON_IsArray(items) || !cJSON_IsNumber(gen)) {
+        cJSON_Delete(j);
+        return send_error(req, "400 Bad Request", "need name, gen and items");
+    }
+    musicdb_lock();
+    if ((uint32_t)gen->valuedouble != musicdb_generation()) {
+        musicdb_unlock();
+        cJSON_Delete(j);
+        return send_error(req, "409 Conflict", "the library was rescanned: reload the page");
+    }
+    int n = 0, *ids = heap_caps_malloc(PLAYLIST_MAX_TRACKS * sizeof(int), MALLOC_CAP_SPIRAM);
+    const cJSON *v;
+    cJSON_ArrayForEach(v, items) {
+        if (ids && n < PLAYLIST_MAX_TRACKS && cJSON_IsNumber(v) && v->valueint >= 0 && v->valueint < musicdb_count()) {
+            ids[n++] = v->valueint;
+        }
+    }
+    char file[48] = "";
+    const char *old_file = cJSON_IsString(old) && playlist_file_ok(old->valuestring) ? old->valuestring : "";
+    bool ok = ids && playlist_save(name->valuestring, old_file, ids, n, file);
+    musicdb_unlock();
+    free(ids);
+    cJSON_Delete(j);
+    if (!ok) {
+        return send_error(req, "500 Internal Server Error", "couldn't write the playlist (card missing?)");
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "file", file);
+    return send_json(req, r, NULL);
+}
+
+// DELETE /api/music/playlist?file=X
+static esp_err_t playlist_delete_handler(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char file[160];
+    if (!query(req, "file", file, sizeof(file))) {
+        return send_error(req, "400 Bad Request", "missing file");
+    }
+    url_decode(file);
+    if (!playlist_delete(file)) {
+        return send_error(req, "404 Not Found", "no such playlist");
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "deleted", true);
+    return send_json(req, r, NULL);
+}
+
 // ---------- start ----------
 
 esp_err_t webui_start(void)
@@ -652,7 +881,7 @@ esp_err_t webui_start(void)
     upload_percent = -1;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 28;
     cfg.lru_purge_enable = true;                            // drop idle connections when busy
     cfg.recv_wait_timeout = 15;                             // seconds per upload read
 
@@ -680,6 +909,11 @@ esp_err_t webui_start(void)
         {.uri = "/api/menu",    .method = HTTP_POST,   .handler = menu_post},
         {.uri = "/api/pair",    .method = HTTP_POST,   .handler = pair_post},
         {.uri = "/api/pair/verify", .method = HTTP_POST, .handler = pair_verify_post},
+        {.uri = "/api/music",   .method = HTTP_GET,    .handler = music_get},
+        {.uri = "/api/music/playlists", .method = HTTP_GET, .handler = playlists_get},
+        {.uri = "/api/music/playlist",  .method = HTTP_GET, .handler = playlist_get},
+        {.uri = "/api/music/playlist",  .method = HTTP_POST, .handler = playlist_post},
+        {.uri = "/api/music/playlist",  .method = HTTP_DELETE, .handler = playlist_delete_handler},
     };
     for (int i = 0; i < (int)(sizeof(routes) / sizeof(routes[0])); i++) {
         httpd_register_uri_handler(handle, &routes[i]);

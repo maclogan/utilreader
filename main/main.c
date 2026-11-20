@@ -22,6 +22,7 @@
 #include "battery.h"                    // onboard fuel gauge
 #include "books.h"                      // books_init()
 #include "buttons.h"                    // buttons_init(), buttons_wait()
+#include "ui_sidebar.h"                // ui_sidebar_set_battery()
 #include "epd.h"                  // halt() screen
 #include "esp_log.h"
 #include "flashcards_app.h"
@@ -58,6 +59,16 @@ static void register_apps(void)
     app_registry_add(&transfer_app, true);
     app_registry_add(&settings_app, true);
     app_registry_add(&power_app, true);
+}
+
+// Hands the fuel gauge's reading to the shared title bar (display can't see the gauge)
+static void update_bar_battery(void)
+{
+    static const ui_battery_t states[] = {
+        [BATTERY_NONE] = UI_BATTERY_NONE, [BATTERY_DISCHARGING] = UI_BATTERY_DISCHARGING,
+        [BATTERY_CHARGING] = UI_BATTERY_CHARGING, [BATTERY_FULL] = UI_BATTERY_FULL,
+    };
+    ui_sidebar_set_battery(battery_percent(), states[battery_state()]);
 }
 
 #define BACKGROUND_TICKS pdMS_TO_TICKS(30 * 1000)  // how often every app's background() runs
@@ -180,6 +191,7 @@ void app_main(void)
     }
     buttons_init();
     battery_init();                                         // wakes the fuel gauge
+    update_bar_battery();
 
     // Get online. If it fails, the Wi-Fi driver keeps retrying in the background.
     if (wifi_connect() != ESP_OK) {
@@ -234,7 +246,9 @@ void app_main(void)
         if (!buttons_wait(&event, wait)) {
             // Timeout: background work, then the app's scheduled update
             if (app_due(next_background)) {
-                if (battery_sample() && app == NULL) {
+                bool battery_changed = battery_sample();
+                update_bar_battery();                       // apps' title bars pick it up on their next redraw
+                if (battery_changed && app == NULL) {
                     show_menu(false);                       // the menu shows the battery
                 }
                 run_background();

@@ -30,6 +30,8 @@ typedef struct {
     char title[128];                    // UTF-8; empty if the file has no tag
     char artist[96];
     char album[96];
+    char album_artist[96];              // "" if the file has none
+    uint16_t track, disc;               // 0 = not tagged
     uint32_t duration_ms;               // 0 = unknown
     uint32_t file_size;
     uint32_t header_start;              // FLAC / WAV: the stream header to re-send after a jump

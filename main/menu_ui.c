@@ -3,7 +3,6 @@
 #include <stdio.h>                      // snprintf()
 #include <string.h>                     // memmove()
 #include <time.h>                       // time()
-#include "battery.h"                    // battery_percent(), battery_state()
 #include "buttons.h"                    // buttons_locked()
 #include "epd.h"                        // drawing primitives + display refresh
 #include "font16.h"                     // the time in the status bar
@@ -26,38 +25,6 @@ static long drawn_minute = -1;          // minute (since 1970) the status bar sh
 static void text_centered(int cx, int y, const char *text, int scale, uint8_t color)
 {
     epd_draw_text(cx - epd_text_width(text, scale) / 2, y, text, scale, color);
-}
-
-// Battery at drawing position u (along the bar), its far end at `end`: "87%" (or "Full"),
-// then a small battery whose fill shows the level, pointing up the bar, and a lightning
-// bolt before the text while charging. Nothing without a battery.
-static void draw_battery(int end)
-{
-    int pct = battery_percent();
-    battery_state_t state = battery_state();
-    if (pct < 0 || state == BATTERY_NONE) {
-        return;
-    }
-    const int w = 14, h = 8, v = 4;                         // battery body, 4 px in from the edge
-    int u = end - w - 2;                                    // leave room for the terminal nub
-    epd_draw_rect(u, v, w, h, EPD_BLACK, false);            // outline
-    epd_draw_rect(u + w, v + 2, 2, h - 4, EPD_BLACK, true); // terminal nub, at the top of the screen
-    int fill = (w - 4) * pct / 100;
-    if (fill > 0) {
-        epd_draw_rect(u + 2, v + 2, fill, h - 4, EPD_BLACK, true);
-    }
-
-    char text[16];
-    snprintf(text, sizeof(text), state == BATTERY_FULL ? "Full" : "%d%%", pct);
-    int text_u = u - 3 - epd_text_width(text, 1);
-    epd_draw_text(text_u, v, text, 1, EPD_BLACK);
-
-    if (state == BATTERY_CHARGING) {
-        int b = text_u - 8;
-        epd_draw_line(b + 4, v - 1, b + 1, v + 4, EPD_BLACK);
-        epd_draw_line(b + 1, v + 4, b + 5, v + 4, EPD_BLACK);
-        epd_draw_line(b + 5, v + 4, b + 2, v + 9, EPD_BLACK);
-    }
 }
 
 // Upright padlock with its top-left corner at screen (x, y)
@@ -84,7 +51,7 @@ static void draw_status(void)
 
     ui_sidebar_begin();
     int u = have_time ? font16_draw_text(0, 0, hm, EPD_BLACK) + 5 : 0;
-    draw_battery(UI_SIDEBAR_LEN);
+    ui_sidebar_battery(UI_SIDEBAR_LEN, true);
     epd_vertical_end();
 
     if (buttons_locked()) {                                 // drawn upright, just above the time

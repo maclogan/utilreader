@@ -127,6 +127,35 @@
   </section>
 
   <section>
+    <h2>Music</h2>
+    <p id="musicinfo" class="muted">Loading…</p>
+    <h3>Playlists</h3>
+    <div id="playlists" class="muted"></div>
+    <p><button id="newpl">New playlist</button></p>
+    <div id="pledit" class="form hidden">
+      <label>Name <input type="text" id="plname" maxlength="60"></label>
+      <div class="row" style="align-items:flex-start; margin-top:10px">
+        <div class="grow">
+          <h3>Library</h3>
+          <input type="text" id="plsearch" placeholder="Search titles, artists, albums">
+          <p class="row" style="margin:6px 0"><span id="plshown" class="muted grow"></span>
+            <button class="small" id="pladdall">Add all shown</button></p>
+          <div id="pllib" class="scroll"></div>
+        </div>
+        <div class="grow">
+          <h3>In the playlist <span id="plcount" class="muted"></span></h3>
+          <div id="plitems" class="scroll"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="plsave">Save to the card</button>
+        <button id="plcancel">Cancel</button>
+        <span id="plstatus" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <h2>Saved words <span class="muted" id="wordcount"></span></h2>
     <div id="words" class="muted scroll">Loading…</div>
   </section>
@@ -581,7 +610,126 @@ function refresh() {
   loadInfo().catch(e => $("space").textContent = e.message);
   loadBooks().catch(e => $("books").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadWords().catch(e => $("words").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+  loadMusic().catch(e => $("musicinfo").innerHTML = `<span class="err">${esc(e.message)}</span>`);
 }
+
+// ---------- music: playlists ----------
+// The board sends its whole library once ([title, artist, album, seconds] per track; the
+// position is the track's id). Playlists are edited here and saved as .m3u8 on the card.
+let music = { gen: 0, songs: [] };
+let plEdit = null;                                  // { file, items: [ids] } while editing
+const mmss = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+const songLabel = i => { const t = music.songs[i]; return t ? `${t[0]} — ${t[1]}` : "?"; };
+
+async function loadMusic() {
+  music = await getJSON("/api/music");
+  const msg = { no_card: "No microSD card in the board.", no_folder: `No folder ${music.dir} on the card (choose one in the board's Settings).`,
+                empty: `No music in ${music.dir} yet.`, not_scanned: "The library hasn't been read yet." }[music.status];
+  $("musicinfo").textContent = msg || `${music.songs.length} songs in ${music.dir}. ` +
+    "Playlists are saved in /Playlists on the card; open them on the board under Music > Playlists.";
+  $("newpl").disabled = music.status !== "ok";
+  await loadPlaylists();
+}
+
+async function loadPlaylists() {
+  const list = await getJSON("/api/music/playlists");
+  if (!list.length) { $("playlists").textContent = "No playlists yet."; return; }
+  $("playlists").innerHTML = `<table><tr><th>Name</th><th class="num">Songs</th><th></th></tr>` +
+    list.map(p => `<tr><td>${esc(p.name)}</td><td class="num">${p.tracks}</td><td class="num">` +
+      `<button class="small" data-edit="${esc(p.file)}">Edit</button> ` +
+      `<button class="small danger" data-del="${esc(p.file)}" data-name="${esc(p.name)}">Delete</button></td></tr>`).join("") +
+    `</table>`;
+  $("playlists").querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editPlaylist(b.dataset.edit));
+  $("playlists").querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete the playlist "${b.dataset.name}"? The songs stay on the card.`)) return;
+    await api("/api/music/playlist?file=" + encodeURIComponent(b.dataset.del), { method: "DELETE" }).catch(() => {});
+    loadPlaylists();
+  });
+}
+
+async function editPlaylist(file) {
+  let name = "", items = [];
+  if (file) {
+    const p = await getJSON("/api/music/playlist?file=" + encodeURIComponent(file));
+    if (p.gen !== music.gen) await loadMusic();
+    name = p.name; items = p.items;
+    $("plstatus").textContent = p.missing ? `${p.missing} entries aren't in the library any more and will be dropped` : "";
+  } else {
+    $("plstatus").textContent = "";
+  }
+  plEdit = { file: file || "", items };
+  $("plname").value = name;
+  $("plsearch").value = "";
+  $("pledit").classList.remove("hidden");
+  drawLibrary();
+  drawItems();
+  $("plname").focus();
+}
+
+function shownSongs() {
+  const q = $("plsearch").value.trim().toLowerCase();
+  const out = [];
+  music.songs.forEach((t, i) => {
+    if (!q || t[0].toLowerCase().includes(q) || t[1].toLowerCase().includes(q) || t[2].toLowerCase().includes(q)) out.push(i);
+  });
+  out.sort((a, b) => {
+    const x = music.songs[a], y = music.songs[b];
+    return x[1].localeCompare(y[1]) || x[2].localeCompare(y[2]) || a - b;   // artist, album, then file order
+  });
+  return out;
+}
+
+function drawLibrary() {
+  const all = shownSongs(), shown = all.slice(0, 300);
+  $("plshown").textContent = all.length > shown.length ? `${shown.length} of ${all.length} shown: search to narrow` : `${all.length} songs`;
+  $("pllib").innerHTML = `<table>` + shown.map(i => {
+    const t = music.songs[i];
+    return `<tr><td><button class="small" data-add="${i}">+</button></td><td>${esc(t[0])}<br>` +
+      `<span class="muted">${esc(t[1])}${t[2] ? " · " + esc(t[2]) : ""}</span></td><td class="num muted">${mmss(t[3])}</td></tr>`;
+  }).join("") + `</table>`;
+  $("pllib").querySelectorAll("[data-add]").forEach(b => b.onclick = () => { plEdit.items.push(+b.dataset.add); drawItems(); });
+}
+
+function drawItems() {
+  const it = plEdit.items;
+  const total = it.reduce((s, i) => s + (music.songs[i] ? music.songs[i][3] : 0), 0);
+  $("plcount").textContent = it.length ? `(${it.length}, ${mmss(total)})` : "";
+  $("plitems").innerHTML = it.length ? `<table>` + it.map((id, k) =>
+    `<tr><td class="num muted">${k + 1}</td><td>${esc(songLabel(id))}</td><td class="num" style="white-space:nowrap">` +
+    `<button class="small" data-up="${k}" ${k ? "" : "disabled"}>↑</button>` +
+    `<button class="small" data-down="${k}" ${k < it.length - 1 ? "" : "disabled"}>↓</button>` +
+    `<button class="small danger" data-rm="${k}">✕</button></td></tr>`).join("") + `</table>` :
+    `<p class="muted">Empty: add songs from the library on the left.</p>`;
+  const move = (k, d) => { [it[k], it[k + d]] = [it[k + d], it[k]]; drawItems(); };
+  $("plitems").querySelectorAll("[data-up]").forEach(b => b.onclick = () => move(+b.dataset.up, -1));
+  $("plitems").querySelectorAll("[data-down]").forEach(b => b.onclick = () => move(+b.dataset.down, 1));
+  $("plitems").querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { it.splice(+b.dataset.rm, 1); drawItems(); });
+}
+
+$("newpl").onclick = () => editPlaylist("");
+$("plcancel").onclick = () => { plEdit = null; $("pledit").classList.add("hidden"); };
+$("plsearch").oninput = drawLibrary;
+$("pladdall").onclick = () => { plEdit.items.push(...shownSongs()); drawItems(); };
+$("plsave").onclick = async () => {
+  const name = $("plname").value.trim();
+  if (!name) { $("plstatus").textContent = "Give it a name"; $("plname").focus(); return; }
+  $("plsave").disabled = true;
+  $("plstatus").textContent = "Saving…";
+  try {
+    const r = await api("/api/music/playlist", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, file: plEdit.file, gen: music.gen, items: plEdit.items }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    plEdit = null;
+    $("pledit").classList.add("hidden");
+    $("plstatus").textContent = "";
+    loadPlaylists();
+  } catch (e) {
+    $("plstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("plsave").disabled = false;
+  }
+};
 
 // ---------- conversion ----------
 // Characters the device's font can draw (see tools/make_font.py)

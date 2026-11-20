@@ -15,7 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "impl/esp_m4a_dec.h"
-#include "library.h"
+#include "musicdb.h"
 
 static const char *TAG = "player";
 
@@ -28,11 +28,13 @@ typedef enum { CMD_PLAY, CMD_PAUSE, CMD_SEEK, CMD_NEXT, CMD_PREV, CMD_STOP } cmd
 
 typedef struct {
     cmd_kind_t kind;
-    int index;
+    int index;                                      // PLAY: queue position
     uint32_t ms;                                    // PLAY: start; SEEK: target
+    int *tracks;                                    // PLAY: the new queue (the player frees it)
+    int count;
 } cmd_t;
 
-// What to do after a track: play `index` from `ms`, or stop (index -1)
+// What to do after a track: play queue position `index` from `ms`, or stop (index -1)
 typedef struct {
     int index;
     uint32_t ms;
@@ -48,6 +50,25 @@ static void (*notify_cb)(void);
 
 static uint8_t *in_buf, *out_buf;
 static uint32_t out_size;
+
+static int *q;                                      // the queue: library track indices
+static volatile int qlen;
+
+// Takes over a PLAY command's queue
+static void install_queue(cmd_t *c)
+{
+    int *old = q;
+    q = c->tracks;
+    qlen = c->count;
+    free(old);
+    c->tracks = NULL;
+}
+
+const int *player_queue(int *count)
+{
+    *count = qlen;
+    return q;
+}
 
 // ---------- status ----------
 
@@ -101,7 +122,19 @@ static void send(cmd_kind_t kind, int index, uint32_t ms)
     xQueueSend(queue, &c, portMAX_DELAY);
 }
 
-void player_play(int index, uint32_t start_ms) { send(CMD_PLAY, index, start_ms); }
+void player_play_queue(const int *tracks, int count, int pos, uint32_t start_ms)
+{
+    if (count <= 0) {
+        return;
+    }
+    int *copy = heap_caps_malloc(count * sizeof(int), MALLOC_CAP_SPIRAM);
+    if (copy == NULL) {
+        return;
+    }
+    memcpy(copy, tracks, count * sizeof(int));
+    cmd_t c = {.kind = CMD_PLAY, .index = pos, .ms = start_ms, .tracks = copy, .count = count};
+    xQueueSend(queue, &c, portMAX_DELAY);
+}
 void player_toggle_pause(void) { send(CMD_PAUSE, 0, 0); }
 void player_next(void) { send(CMD_NEXT, 0, 0); }
 void player_prev(void) { send(CMD_PREV, 0, 0); }
@@ -281,14 +314,20 @@ static void wait_paused(cmd_t *c, bool *was_off)
 static next_t play_track(int index, uint32_t start_ms)
 {
     next_t next = {.index = -1};
-    char path[300];
-    library_path(index, path, sizeof(path));
+    int track = q[index];
+    const musicdb_track_t *t = musicdb_track(track);
+    char path[400];
+    musicdb_path(track, path, sizeof(path));
     stream_t s = {0};
 
     lock();
     memset(&st, 0, sizeof(st));
-    st.index = index;
-    snprintf(st.title, sizeof(st.title), "%s", library_name(index));
+    st.index = track;
+    st.queue_pos = index;
+    st.queue_len = qlen;
+    snprintf(st.title, sizeof(st.title), "%s", t->title);
+    snprintf(st.artist, sizeof(st.artist), "%s", musicdb_artist_of(track));
+    snprintf(st.album, sizeof(st.album), "%s", t->album);
     base_ms = start_ms;
     seeking = false;
     unlock();
@@ -299,11 +338,6 @@ static next_t play_track(int index, uint32_t start_ms)
         return (next_t){.index = index + 1};
     }
     lock();
-    if (s.info.title[0]) {
-        snprintf(st.title, sizeof(st.title), "%s", s.info.title);
-    }
-    snprintf(st.artist, sizeof(st.artist), "%s", s.info.artist);
-    snprintf(st.album, sizeof(st.album), "%s", s.info.album);
     st.duration_ms = s.info.duration_ms;
     st.format = s.info.format;
     unlock();
@@ -375,7 +409,7 @@ static next_t play_track(int index, uint32_t start_ms)
                 continue;
             }
             switch (c.kind) {
-            case CMD_PLAY: next = (next_t){c.index, c.ms}; break;
+            case CMD_PLAY: install_queue(&c); next = (next_t){c.index, c.ms}; break;
             case CMD_NEXT: next = (next_t){index + 1, 0}; break;
             case CMD_PREV: {
                 player_status_t now;
@@ -518,6 +552,7 @@ static void player_task(void *arg)
             cmd_t c;
             xQueueReceive(queue, &c, portMAX_DELAY);
             if (c.kind == CMD_PLAY) {
+                install_queue(&c);
                 next = (next_t){c.index, c.ms};
             } else if (c.kind == CMD_STOP) {
                 audio_stop();
@@ -525,7 +560,7 @@ static void player_task(void *arg)
             }
             continue;                                       // nothing loaded: other commands are moot
         }
-        if (next.index >= library_count()) {
+        if (next.index >= qlen || next.index < 0 || q == NULL) {
             // End of the list
             audio_stop();
             lock();

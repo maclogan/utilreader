@@ -8,10 +8,10 @@ microphone. Wiring: [HARDWARE.md](../HARDWARE.md#audio-and-the-io-expander).
 ```
  microSD (FAT32)       components/sdcard        mount at /sdcard, on the shared rail
       |
- app_music/library.c   track list: the music folder + subfolders, sorted by path
- app_music/media_info  tags, duration, where the audio starts (seeking)
+ musicdb/              the library: tags (cached in /.musicdb), artists, albums, playlists
+ musicdb/media_info    tags, duration, where the audio starts (seeking)
       |
- app_music/player.c    player task: read 16 KB -> esp_audio_codec -> PCM
+ app_music/player.c    player task: plays a queue; read 16 KB -> esp_audio_codec -> PCM
       |
  components/audio      ring buffer (PSRAM, ~1 s) -> audio_out task -> I2S (32-bit stereo)
       |                 GPIO4 BCLK, GPIO5 WS, GPIO43 data

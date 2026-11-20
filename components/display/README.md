@@ -176,11 +176,15 @@ and drawing y to the right. Anything (5×7 text, the 16 px font, rectangles) the
 reading bottom to top, as on a book spine.
 
 `ui_sidebar(title, counter)` uses it for the title bar: an 18 px strip on the left edge
-with the title (UTF-8, cut off if too long) from the bottom, a small counter such as
-"3/12" at the top, and a rule. Content starts at `UI_CONTENT_X`; `UI_CONTENT_W` and
-`UI_CONTENT_CX` help with centering. The Story, Cards, Books and Settings screens use it,
-and the main menu draws its status bar with `ui_sidebar_begin()` / `ui_sidebar_rule()`.
-Titles get about 120 px: 7 Chinese characters, or 15 Latin letters.
+with the title (UTF-8, cut off if too long) from the bottom, the battery at the top end, a
+small counter such as "3/12" just below it, and a rule. The battery shows its percentage when
+the title still fits beside it, otherwise just the icon; `main.c` feeds it with
+`ui_sidebar_set_battery()` from the fuel gauge (at start-up and every 30 s), since the display
+driver can't see the gauge, and `ui_sidebar_battery()` draws it (the main menu's status bar
+uses it too). Content starts at `UI_CONTENT_X`; `UI_CONTENT_W` and `UI_CONTENT_CX` help with
+centering. Every app screen uses it, and the main menu draws its status bar with
+`ui_sidebar_begin()` / `ui_sidebar_rule()`. Titles get about 120 px less the battery: about
+6 Chinese characters, or 12 Latin letters, with the percentage shown.
 
 ## Wiring diagnostic (`epd_diag.c`)
 

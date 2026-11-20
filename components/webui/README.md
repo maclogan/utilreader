@@ -47,6 +47,11 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `POST /api/apps/settings?id=ID` | Body `{"key": value, ...}`: checked against the schema and saved; the app restarts with them. 400 `{"error"}` names a bad value |
 | `GET /api/menu` | Every app in menu order `[{"id","name","hidden","can_hide","system","native"}]` |
 | `POST /api/menu` | Body `{"order": [ids of the regular apps], "hidden": [ids]}`: the menu updates straight away |
+| `GET /api/music` | `{"status","dir","gen","songs":[[title, artist, album, seconds], ...]}`: the whole library, streamed (the array position is the song's id until the next scan, `gen`). Scans first if nothing has been scanned |
+| `GET /api/music/playlists` | `[{"file","name","tracks"}]` |
+| `GET /api/music/playlist?file=F` | `{"file","name","items":[ids],"missing","gen"}` |
+| `POST /api/music/playlist` | Body `{"name","file" (being replaced, or ""),"gen","items":[ids]}` → `{"file"}`; 409 if the library was rescanned meanwhile |
+| `DELETE /api/music/playlist?file=F` | Delete a playlist (not the songs) |
 
 ## The app catalog
 

@@ -25,6 +25,9 @@ CONFIG_FATFS_LFN_HEAP=y
 # Three FAT volumes: /store, /books and the microSD card (/sdcard)
 CONFIG_FATFS_VOLUME_COUNT=3
 
+# File names as UTF-8 (songs and folders named in any language)
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
 # Console on the USB port only: UART0's TX pin (GPIO43) carries I2S audio to the DAC
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

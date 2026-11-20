@@ -12,8 +12,8 @@ switch, a BACK / HOME button and a lock switch) are wired to its 14-pin header.
 | **Story** | A short Chinese graded-reader story written by Claude each day, with per-word pinyin and meaning lookup and a saved-words list |
 | **Cards** | Spaced-repetition flashcards of the words saved in the story |
 | **Books** | E-book reader: chapters, reading position and progress kept per book |
-| **Music** | Plays MP3, FLAC, WAV, M4A/AAC and OGG/Opus from the microSD card to headphones (TLV320DAC3100), in the background while you use other apps |
-| **Transfer** | While open, a web page on your Wi-Fi to add/delete books and see saved words |
+| **Music** | Plays MP3, FLAC, WAV, M4A/AAC and OGG/Opus from the microSD card to headphones (TLV320DAC3100). Browse by playlist, artist, album or song, or shuffle; keeps playing while you use other apps. Playlists are made on the web page |
+| **Transfer** | While open, a web page on your Wi-Fi to add/delete books, make music playlists, and see saved words |
 | **Settings** | Set the date and time by hand; turn the screen upside down; choose the music folder |
 | **Power** | Turns the device off (hold BACK / HOME to turn it on again) |
 
@@ -163,7 +163,9 @@ components/
   app_story/              Story app
   app_flashcards/         Flashcards (Cards) app
   app_reader/             Books (e-reader) app
-  app_music/              Music app: library, Now playing, player task, tag reader
+  musicdb/                the music library: tags (cached on the card), artists, albums,
+                          playlists (.m3u8 in /Playlists); used by Music and the web page
+  app_music/              Music app: library menus, Now Playing, the player task
   app_transfer/           Transfer app (runs the web interface while open)
   app_settings/           Settings app (date, time, screen rotation, music folder)
 tools/make_font.py        builds the embedded font from GNU Unifont
