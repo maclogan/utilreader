@@ -23,9 +23,13 @@ typedef struct {
 // Fills *out for row i
 typedef void (*media_row_fn)(int i, media_row_t *out);
 
-// Starts a frame (full refresh when asked, when the panel slept, or every so often against
-// ghosting); returns whether it's a full one. media_ui_finish() shows it.
+// Starts a frame (full refresh when asked or when the panel slept); returns whether it's a
+// full one. media_ui_finish() shows it.
 bool media_ui_begin(bool full);
+
+// For screens of your own drawn with media_ui_begin(): true when `key` names a different
+// screen from the last one shown (then use a full refresh: the whole screen changes)
+bool media_ui_screen_changes(const char *key);
 void media_ui_finish(bool full);
 
 // The list screen. `hint` (may be NULL) is shown in the middle when count is 0.

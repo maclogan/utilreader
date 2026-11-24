@@ -245,5 +245,29 @@ void story_ui_show_message(const char *title, const char *detail)
 
 void story_ui_draw_app_icon(int cx, int cy)
 {
-    font16_draw_char(cx - 16, cy - 16, 0x6587, 2, EPD_BLACK);   // 文 ("writing"), drawn at 2x
+    // 文 ("writing"), a little heavier than the plain glyph, in a rounded 2 px frame
+    const int half = 21, r = 7;
+    for (int t = 0; t < 2; t++) {
+        int h = half - t;
+        epd_draw_hline(cx - h + r, cy - h, 2 * (h - r) + 1, EPD_BLACK);   // straight edges
+        epd_draw_hline(cx - h + r, cy + h, 2 * (h - r) + 1, EPD_BLACK);
+        epd_draw_line(cx - h, cy - h + r, cx - h, cy + h - r, EPD_BLACK);
+        epd_draw_line(cx + h, cy - h + r, cx + h, cy + h - r, EPD_BLACK);
+        for (int sx = -1; sx <= 1; sx += 2) {               // rounded corners
+            for (int sy = -1; sy <= 1; sy += 2) {
+                int ccx = cx + sx * (half - r), ccy = cy + sy * (half - r);
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        int d2 = dx * dx + dy * dy;
+                        if (d2 >= (r - 1 - t) * (r - 1 - t) && d2 <= (r - t) * (r - t) + (r - t) &&
+                            dx * sx >= 0 && dy * sy >= 0) {
+                            epd_draw_pixel(ccx + dx, ccy + dy, EPD_BLACK);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    font16_draw_char(cx - 16, cy - 15, 0x6587, 2, EPD_BLACK);
+    font16_draw_char(cx - 15, cy - 15, 0x6587, 2, EPD_BLACK);   // a pixel over: heavier strokes
 }

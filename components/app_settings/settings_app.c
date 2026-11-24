@@ -34,12 +34,16 @@ static const char *TAG = "settings_app";
 #define INFO_RULE_Y 111                 // a rule, then one line of small text at the bottom
 #define INFO_Y      116
 
-typedef enum { ROW_DATE, ROW_TIME, ROW_ROTATE, ROW_REFRESH, ROW_PICTURES, ROW_DARKNESS, ROW_MUSIC, ROW_PODCASTS, ROW_BOOKS, ROW_VOICE, ROW_CARD, ROW_FORMAT, ROW_COUNT } row_t;
-static const char *const labels[ROW_COUNT] = {"Date", "Time", "Rotate", "Refresh", "Pictures", "Darkness", "Music", "Podcasts", "Books", "Voice", "Card", "Format"};
+typedef enum { ROW_DATE, ROW_TIME, ROW_ROTATE, ROW_REFRESH, ROW_CLEANUP, ROW_PICTURES, ROW_DARKNESS, ROW_MUSIC, ROW_PODCASTS, ROW_BOOKS, ROW_VOICE, ROW_CARD, ROW_FORMAT, ROW_COUNT } row_t;
+static const char *const labels[ROW_COUNT] = {"Date", "Time", "Rotate", "Refresh", "Cleanup", "Pictures", "Darkness", "Music", "Podcasts", "Books", "Voice", "Card", "Format"};
 // Settings > Darkness: how much pictures are lightened before dithering (epd_set_picture_gamma)
 #define DARKNESS_LEVELS 5
 static const int darkness_gamma[DARKNESS_LEVELS] = {50, 62, 75, 87, 100};   // 1 lightest .. 5 untouched
 static bool dark_editing;               // the Darkness slider is being moved
+static bool cleanup_editing;            // Cleanup (full refresh after N quick ones) is being changed
+#define CLEANUP_STEP 5
+#define CLEANUP_MIN  5
+#define CLEANUP_MAX  60
 
 // The level for the current gamma: the nearest one
 static int darkness_level(void)
@@ -604,6 +608,9 @@ static void draw(bool full)
         } else if (r == ROW_REFRESH) {
             static const char *const modes[] = {"Stock", "Clean", "Quick", "Quickest"};
             snprintf(value, sizeof(value), "%s", modes[epd_partial_mode()]);
+        } else if (r == ROW_CLEANUP) {
+            snprintf(value, sizeof(value), cleanup_editing && r == row ? "< every %d >" : "every %d",
+                     epd_full_every());
         } else if (r == ROW_PICTURES) {
             snprintf(value, sizeof(value), "%s", settings_get_i32(SETTING_ROTATE_TALL, 1) ? "Turn tall ones" : "Always upright");
         } else if (r == ROW_DARKNESS) {
@@ -685,6 +692,10 @@ static void draw(bool full)
         info_line(0, "press: turn the screen upside down");
     } else if (row == ROW_REFRESH) {
         info_line(0, "press: next way to do quick refreshes");
+    } else if (row == ROW_CLEANUP && cleanup_editing) {
+        info_line(0, "< > fewer / more quick refreshes  press: done");
+    } else if (row == ROW_CLEANUP) {
+        info_line(0, "Full refresh after this many quick ones");
     } else if (row == ROW_PICTURES) {
         info_line(0, "Tall pictures sideways: twice as big");
     } else if (row == ROW_DARKNESS && dark_editing) {
@@ -726,6 +737,7 @@ static void settings_open(const app_t *self)
     picking = false;
     confirm_format = false;
     dark_editing = false;
+    cleanup_editing = false;
     notice[0] = '\0';
     draw(true);
 }
@@ -766,6 +778,9 @@ static bool button_choosing(button_event_t event)
             epd_set_partial_mode(mode);
             settings_set_i32(SETTING_PARTIAL_MODE, mode);
             draw(true);                                     // a clean start: the ways keep the previous image differently
+        } else if (row == ROW_CLEANUP) {
+            cleanup_editing = true;                         // left / right change it
+            draw(false);
         } else if (row == ROW_PICTURES) {
             settings_set_i32(SETTING_ROTATE_TALL, !settings_get_i32(SETTING_ROTATE_TALL, 1));
             draw(false);
@@ -853,6 +868,21 @@ static bool settings_button(const app_t *self, button_event_t event)
     }
     if (event == BUTTON_SELECT_HOLD) {
         event = BUTTON_SELECT;                              // only the format screen tells them apart
+    }
+    if (cleanup_editing) {                                  // Cleanup: full refresh every N
+        int n = epd_full_every();
+        if (event == BUTTON_LEFT || event == BUTTON_RIGHT || event == BUTTON_LEFT_HOLD || event == BUTTON_RIGHT_HOLD) {
+            n += (event == BUTTON_LEFT || event == BUTTON_LEFT_HOLD) ? -CLEANUP_STEP : CLEANUP_STEP;
+            n = n < CLEANUP_MIN ? CLEANUP_MIN : n > CLEANUP_MAX ? CLEANUP_MAX : n;
+            epd_set_full_every(n);
+            settings_set_i32(SETTING_FULL_EVERY, n);
+        } else if (event == BUTTON_SELECT || event == BUTTON_BACK) {
+            cleanup_editing = false;
+        } else {
+            return true;
+        }
+        draw(false);
+        return true;
     }
     if (dark_editing) {                                     // the Darkness slider
         int level = darkness_level();

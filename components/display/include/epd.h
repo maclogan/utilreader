@@ -85,6 +85,11 @@ void epd_set_picture_gamma(int percent);
 /* How partial refreshes are done (Settings > Refresh; main.c applies the saved choice):
  * STOCK the chip's own waveform; CLEAN Waveshare's for this panel; QUICK and QUICKEST the same
  * with a shorter drive phase (faster, possibly fainter). Each logs how long the panel was busy. */
+/* After this many quick (partial) refreshes in a row, the next is a full one, whatever asked
+ * for it (ghosting builds up). Settings > Cleanup; main.c applies the saved value. */
+void epd_set_full_every(int n);
+int epd_full_every(void);
+
 enum { EPD_PARTIAL_STOCK, EPD_PARTIAL_CLEAN, EPD_PARTIAL_QUICK, EPD_PARTIAL_QUICKEST, EPD_PARTIAL_MODES };
 void epd_set_partial_mode(int mode);
 int epd_partial_mode(void);

@@ -12,6 +12,7 @@
 #define SETTING_MENU_ROWS  "menu_rows"  // home screen: 1 or 2 rows of tiles (web page; default 2)
 #define SETTING_MENU_COLS  "menu_cols"  // home screen: 3-5 tiles per row (web page; default 4)
 #define SETTING_ROTATE_TALL "rot_tall" // 1 (default) = tall pictures (book pictures, the off screen photo) turned sideways when that doubles their size
+#define SETTING_FULL_EVERY "full_every" // full refresh after this many quick ones (Settings > Cleanup; epd.h)
 #define SETTING_PARTIAL_MODE "partial"  // how partial refreshes are done (Settings > Refresh; epd.h)
 #define SETTING_PICTURE_GAMMA "pic_gamma" // pictures' gamma x 100 (Settings > Darkness; main.c applies it)
 #define SETTING_MUSIC_DIR  "music_dir"  // music folder on the microSD card (Settings app; the music app reads it)

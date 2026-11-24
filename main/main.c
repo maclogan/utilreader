@@ -171,6 +171,7 @@ void app_main(void)
     epd_set_rotated(settings_get_i32(SETTING_ROTATE_180, epd_rotated()));  // default: menuconfig
     epd_set_picture_gamma(settings_get_i32(SETTING_PICTURE_GAMMA, epd_picture_gamma()));
     epd_set_partial_mode(settings_get_i32(SETTING_PARTIAL_MODE, EPD_PARTIAL_STOCK));
+    epd_set_full_every(settings_get_i32(SETTING_FULL_EVERY, epd_full_every()));
     power_boot_check();                                     // woken from "off": on only if BACK is held
 #if CONFIG_DISPLAY_DIAGNOSTIC
     vTaskDelay(pdMS_TO_TICKS(4000));                        // time to open the serial log after a reset
@@ -324,6 +325,7 @@ void app_main(void)
         if (event == BUTTON_LEFT || event == BUTTON_RIGHT) {  // move the highlight (wraps around)
             int n = app_count();
             selected = (selected + (event == BUTTON_LEFT ? n - 1 : 1)) % n;
+            ESP_LOGI(TAG, "highlight %s", app_at(selected)->name);
             show_menu(false);                               // partial: only the highlight moved
         } else if (event == BUTTON_SELECT) {
             open_app(selected);

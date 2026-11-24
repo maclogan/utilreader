@@ -20,13 +20,11 @@
 #define LIST_X      (UI_CONTENT_X + MARGIN)
 #define ROW_H       21                  // 6 x 21 = 126 of 128 px
 #define SCROLL_W    4
-#define FULL_EVERY  30                  // partial refreshes between full ones (ghosting)
 #define ELLIPSIS    0x2026
 #define ART         96                  // album art box, px: the left third of the screen
 
 static const char *TAG = "media_ui";
 
-static int partials;
 
 // ---------- Now Playing's text ----------
 //
@@ -116,13 +114,33 @@ static int title_lines(int x, int y, const char *text, int right)
     return y + 2 * (FONT16_HEIGHT + 1);
 }
 
+// Which screen is up (a list's title, Now Playing...). A different one means the whole screen
+// changes: a full refresh then, which also clears the ghosting the quick ones leave. (The display
+// driver adds one after every so many quick refreshes too: Settings > Cleanup.)
+static char shown_screen[100];
+static bool screen_changes(const char *key);
+
+bool media_ui_screen_changes(const char *key)
+{
+    return screen_changes(key);
+}
+
+static bool screen_changes(const char *key)
+{
+    if (strcmp(key, shown_screen) == 0) {
+        return false;
+    }
+    ESP_LOGI(TAG, "screen \"%s\" -> \"%s\": full refresh", shown_screen, key);
+    snprintf(shown_screen, sizeof(shown_screen), "%s", key);
+    return true;
+}
+
 bool media_ui_begin(bool full)
 {
-    if (!full && (!epd_is_awake() || ++partials >= FULL_EVERY)) {
+    if (!full && !epd_is_awake()) {
         full = true;
     }
     if (full) {
-        partials = 0;
         epd_init();
     }
     epd_clear(EPD_WHITE);
@@ -193,7 +211,10 @@ static uint32_t art_shown_sum;          // checksum of the cover on screen (0 = 
 
 void media_ui_list(const char *title, int n, int sel, media_row_fn row, const char *hint, bool full)
 {
-    full = media_ui_begin(full);
+    char key[100];
+    snprintf(key, sizeof(key), "list:%.90s", title);
+    bool changed = screen_changes(key);                     // noted even when `full` already (no || short cut)
+    full = media_ui_begin(full || changed);
     art_shown_sum = 0;                  // the cover is off screen
     char counter[16];
     snprintf(counter, sizeof(counter), "%d/%d", sel + 1, n);
@@ -437,7 +458,8 @@ void media_ui_playing(bool seek_mode, const char *seek_hint, const char *idle, b
     if (art.sum != art_shown_sum) {
         full = true;                    // a new cover needs the grey (full) refresh
     }
-    full = media_ui_begin(full);
+    bool changed = screen_changes("playing");
+    full = media_ui_begin(full || changed);
     art_shown_sum = art.sum;
     char a[16], b[24], line[64];
 
@@ -510,6 +532,7 @@ void media_ui_playing(bool seek_mode, const char *seek_hint, const char *idle, b
 void media_ui_message(const char *bar_title, const char *title, const char *detail, const char *hint)
 {
     media_ui_begin(true);
+    screen_changes("message");
     art_shown_sum = 0;
     ui_sidebar(bar_title, NULL);
     font16_draw_text(UI_CONTENT_CX - font16_text_width(title) / 2, 34, title, EPD_BLACK);

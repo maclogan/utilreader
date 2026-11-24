@@ -36,6 +36,10 @@ e-books folders, and format the microSD card.
   (the chip's own waveform, ~890 ms, nudges every pixel), **Clean** (Waveshare's waveform for this
   panel, ~830 ms, leaves unchanged pixels nearly alone), **Quick** (~630 ms) and **Quickest**
   (~430 ms: the same with a shorter drive, possibly a little faint). The log shows each refresh's time.
+- **Cleanup**: after this many quick refreshes in a row, the next one is a full refresh (the fast
+  kind, ~1.7 s; clears most of the ghosting quick ones leave), in every app. Press to change, left / right in steps of 5
+  (5-60, default 20), press or BACK when done. Apps also do a thorough full refresh (~3.3 s,
+  clears every trace) whenever the whole screen changes (opening / closing an app, a list to Now Playing and back, another list).
 - **Darkness** is a slider (1 lightest .. 5 untouched): press to adjust, left / right to move it,
   press or BACK when done. It applies to every picture (album art, book pictures, the off screen photo).
 - **Card** shows the mounted card's size ("not in" without one). Press: unmount and mount it

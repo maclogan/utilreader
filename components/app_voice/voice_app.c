@@ -313,7 +313,8 @@ static void draw_list(bool full)
 
 static void draw_recording(bool full)
 {
-    full = media_ui_begin(full);
+    bool changed = media_ui_screen_changes("recording");
+    full = media_ui_begin(full || changed);
     ui_sidebar("Recording", NULL);
     char t[16];
     media_ui_format_time(t, sizeof(t), (uint32_t)((uint64_t)rec_frames * 1000 / RATE));

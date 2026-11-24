@@ -20,6 +20,11 @@
 #define EPD_SPI_HOST    SPI2_HOST
 #define EPD_SPI_HZ      (4 * 1000 * 1000)
 #define BUSY_TIMEOUT_MS 10000
+#ifdef CONFIG_DISPLAY_FAST_REFRESH
+#define FAST_REFRESH_ON 1
+#else
+#define FAST_REFRESH_ON 0
+#endif
 #define THOROUGH_EVERY  10              /* fast full refreshes: every 10th is the normal, slower one */
 
 /* Native panel memory is portrait: 128 px wide, 296 rows */
@@ -358,6 +363,19 @@ static EventGroupHandle_t state;        /* IDLE bit: nothing pending or running 
 
 static TaskHandle_t task;
 static bool screen_grey;                /* main side: the last full refresh showed grey */
+static int partials_since_full;         /* main side: quick refreshes since the last full one */
+static bool pending_thorough;           /* task side: the queued full refresh is one an app asked for */
+static int full_every = 20;             /* ... after this many, the next one is full (Settings > Cleanup) */
+
+void epd_set_full_every(int n)
+{
+    full_every = n < 2 ? 2 : n > 100 ? 100 : n;
+}
+
+int epd_full_every(void)
+{
+    return full_every;
+}
 static uint8_t *shown;                  /* task only: the black/white image being shown */
 
 static bool asleep = true;              /* panel needs epd_init() before it can show anything */
@@ -429,11 +447,12 @@ static void display_grey(void)
     write_base(shown);
 }
 
-/* The chip's black/white full refresh: the thorough one (~3 s, flashes several times) or,
- * with CONFIG_DISPLAY_FAST_REFRESH, its shorter variant (~1.5 s), chosen by telling the
- * chip it is hot. The fast one clears ghosting less well, so every THOROUGH_EVERY-th
- * refresh is the thorough one. */
-static void display_bw(void)
+/* The chip's black/white full refresh: the thorough one (~3.3 s, flashes several times; clears
+ * every trace of the last screen) or its shorter variant (~1.65 s, chosen by telling the chip it
+ * is hot; leaves a faint trace). Thorough when an app asked for it (the whole screen changes:
+ * opening / closing an app, another screen); fast for the driver's own (the cleanup after so
+ * many quick refreshes, leaving a grey screen), with every THOROUGH_EVERY-th of those thorough. */
+static void display_bw(bool thorough)
 {
     if (registers_reset_by_partial) {   /* set the controller up again after a CLEAN partial */
         epd_reset();
@@ -441,11 +460,8 @@ static void display_bw(void)
         registers_reset_by_partial = false;
     }
     write_base(shown);
-#if CONFIG_DISPLAY_FAST_REFRESH
-    bool fast = fulls % THOROUGH_EVERY != 0;
-#else
-    bool fast = false;
-#endif
+    static int fast_ones;
+    bool fast = FAST_REFRESH_ON && !thorough && ++fast_ones % THOROUGH_EVERY != 0;
     if (fast) {
         epd_cmd(0x18);              /* internal temperature sensor */
         epd_data(0x80);
@@ -547,8 +563,10 @@ static void display_task(void *arg)
             xSemaphoreTake(snap_lock, portMAX_DELAY);
             op_t op = pending;
             bool init = pending_init;
+            bool thorough = pending_thorough;
             pending = OP_NONE;
             pending_init = false;
+            pending_thorough = false;
             if (op == OP_NONE && !init) {
                 xEventGroupSetBits(state, IDLE_BIT);
                 xSemaphoreGive(snap_lock);
@@ -573,7 +591,7 @@ static void display_task(void *arg)
             }
             switch (op) {
             case OP_FULL:
-                display_bw();
+                display_bw(thorough);
                 fulls++;
                 break;
             case OP_PARTIAL:
@@ -614,11 +632,21 @@ static void task_start(void)
  * either way the newest snapshot is what gets shown. */
 static void request(op_t op)
 {
+    bool asked_full = op == OP_FULL;                /* by an app (vs. turned into one below) */
     /* Leaving a grey screen: a partial refresh can't clear grey pixels whose black/white
      * value doesn't change (light grey -> white), so it would leave a faint ghost of the
      * picture. Use a full refresh then. */
     if (op == OP_PARTIAL && screen_grey && !has_grey) {
+        ESP_LOGI(TAG, "full refresh: leaving a grey screen");
         op = OP_FULL;
+    }
+    /* Ghosting builds up with every quick refresh: after full_every of them, a full one */
+    if (op == OP_PARTIAL && ++partials_since_full >= full_every) {
+        ESP_LOGI(TAG, "full refresh: cleanup after %d quick ones", full_every);
+        op = OP_FULL;
+    }
+    if (op == OP_FULL) {
+        partials_since_full = 0;
     }
     if (op == OP_FULL) {
         screen_grey = has_grey;
@@ -629,6 +657,9 @@ static void request(op_t op)
     snap_grey = has_grey;
     if (op != OP_PARTIAL || pending == OP_NONE) {
         pending = op;
+    }
+    if (asked_full) {
+        pending_thorough = true;                    /* merged requests: thorough wins */
     }
     xEventGroupClearBits(state, IDLE_BIT);
     xSemaphoreGive(snap_lock);
