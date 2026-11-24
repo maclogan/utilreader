@@ -47,6 +47,7 @@ static player_status_t st = {.index = -1};
 static uint32_t base_ms;                            // position when audio_frames_played() was 0
 static bool seeking;
 static void (*notify_cb)(void);
+static bool can_skip;                               // stopped by a problem or the list's end: next / prev resume
 
 static uint8_t *in_buf, *out_buf;
 static uint32_t out_size;
@@ -337,6 +338,7 @@ static next_t play_track(int index, uint32_t start_ms)
     snprintf(st.title, sizeof(st.title), "%s", item.title);
     snprintf(st.artist, sizeof(st.artist), "%s", item.artist);
     snprintf(st.album, sizeof(st.album), "%s", item.album);
+    snprintf(st.path, sizeof(st.path), "%s", item.path);
     base_ms = start_ms;
     seeking = false;
     unlock();
@@ -574,7 +576,15 @@ static void player_task(void *arg)
             if (c.kind == CMD_PLAY) {
                 install_queue(&c);
                 next = (next_t){c.index, c.ms};
+            } else if ((c.kind == CMD_NEXT || c.kind == CMD_PREV) && q && qlen > 0 && can_skip) {
+                // Stopped (a track couldn't play, or the list ended), but the list is still
+                // here: skipping moves along it from where it stopped
+                int at = st.queue_pos + (c.kind == CMD_NEXT ? 1 : -1);
+                if (at >= 0 && at < qlen) {
+                    next = (next_t){at, PLAYER_ITEM_START};
+                }
             } else if (c.kind == CMD_STOP) {
+                can_skip = false;                           // stopped on purpose: skipping doesn't restart it
                 audio_stop();
                 xSemaphoreGive(stopped_sem);
             }
@@ -582,6 +592,7 @@ static void player_task(void *arg)
         }
         if (next.index >= qlen || next.index < 0 || q == NULL) {
             // End of the list
+            can_skip = true;                                // previous track still reachable
             audio_stop();
             lock();
             st.index = -1;
@@ -596,6 +607,9 @@ static void player_task(void *arg)
         unlock();
         next = play_track(next.index, next.ms);
         if (next.index < 0) {
+            lock();
+            can_skip = st.message[0] != '\0';             // stopped by a problem: skipping moves on
+            unlock();
             audio_stop();
             lock();
             st.index = -1;
@@ -603,6 +617,69 @@ static void player_task(void *arg)
             unlock();
             notify();
             xSemaphoreGive(stopped_sem);
+        }
+    }
+}
+
+// ---------- headphones: unplugging pauses, the inline button controls playback ----------
+//
+// The TLV320 watches the jack (audio_headset_*), polled here every HEADSET_POLL_MS. Unplugging
+// while playing pauses (plugging back in leaves it paused). The inline button: one press =
+// play / pause, two = next track, three = previous. Presses are counted until HEADSET_GAP_MS
+// passes without another. Button presses right after a plug change are ignored: pulling a
+// plug out briefly shorts the contact the button uses.
+
+#define HEADSET_POLL_MS     50
+#define HEADSET_GAP_MS      450         // a pause this long ends a group of presses
+#define HEADSET_SETTLE_MS   600         // after a plug change, button presses are ignored this long
+#define HEADSET_RETRY_MS    10000       // no DAC yet: look again this often
+
+static void headset_task(void *arg)
+{
+    while (!audio_headset_init()) {
+        vTaskDelay(pdMS_TO_TICKS(HEADSET_RETRY_MS));        // the DAC isn't wired (yet)
+    }
+    ESP_LOGI(TAG, "headset detection on");
+    bool was_pressed = false;
+    int presses = 0;
+    TickType_t last_press = 0, last_plug = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(HEADSET_POLL_MS));
+        bool plugged, pressed;
+        int ev = audio_headset_poll(&plugged, &pressed);
+        TickType_t now = xTaskGetTickCount();
+        if (ev < 0) {
+            continue;
+        }
+        if (ev & AUDIO_HEADSET_PLUG) {
+            last_plug = now;
+            presses = 0;
+            ESP_LOGI(TAG, "headphones %s", plugged ? "plugged in" : "unplugged");
+            if (!plugged && player_active() && !st.paused) {
+                player_toggle_pause();                      // unplugged while playing: pause
+            }
+        }
+        bool settling = pdTICKS_TO_MS(now - last_plug) < HEADSET_SETTLE_MS;
+        // A press: the button went down since the last poll (live state), or a press too short
+        // to see in between (the sticky flag)
+        bool press = (pressed && !was_pressed) || ((ev & AUDIO_HEADSET_BUTTON) && !pressed && !was_pressed);
+        was_pressed = pressed;
+        if (press && plugged && !settling) {
+            presses++;
+            last_press = now;
+        }
+        if (presses && !pressed && pdTICKS_TO_MS(now - last_press) >= HEADSET_GAP_MS) {
+            ESP_LOGI(TAG, "headset button x%d", presses);
+            if (player_active()) {
+                if (presses == 1) {
+                    player_toggle_pause();
+                } else if (presses == 2) {
+                    player_next();
+                } else {
+                    player_prev();
+                }
+            }
+            presses = 0;
         }
     }
 }
@@ -620,4 +697,5 @@ void player_init(void (*notify_fn)(void))
     out_size = OUT_START_SIZE;
     out_buf = heap_caps_malloc(out_size, MALLOC_CAP_8BIT);
     xTaskCreate(player_task, "player", 12 * 1024, NULL, 8, NULL);
+    xTaskCreate(headset_task, "headset", 3072, NULL, 4, NULL);
 }

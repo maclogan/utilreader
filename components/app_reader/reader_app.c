@@ -186,6 +186,7 @@ static void show_page(bool full, bool turned)
     }
 
     view = VIEW_READING;
+    reader_layout_set_book(book.id);                        // where picture pages find their pictures
     reader_ui_page(window, n, at_end, left, right, full);
     books_set_position(book.id, start);
 }
@@ -359,8 +360,39 @@ static void open_book(const book_info_t *b)
 
 // ---------- app callbacks ----------
 
+// Converts books dropped into the books folder as .epub / .txt files (books_import_next)
+static void import_books(void)
+{
+    int total = books_import_pending();
+    if (total == 0) {
+        return;
+    }
+    char name[96], detail[48];
+    bool converted;
+    int done = 0, failed = 0;
+    snprintf(detail, sizeof(detail), "1 of %d", total);
+    reader_ui_message("Preparing books", detail);
+    while (books_import_next(name, sizeof(name), &converted)) {
+        done++;
+        failed += !converted;
+        if (done < total) {
+            snprintf(detail, sizeof(detail), "%d of %d", done + 1, total);
+            reader_ui_message("Preparing books", detail);
+        }
+    }
+    if (failed) {
+        snprintf(detail, sizeof(detail), "%d couldn't be read: use the web page", failed);
+        reader_ui_message("Some books were skipped", detail);
+        vTaskDelay(pdMS_TO_TICKS(2500));
+    } else {
+        reader_ui_message("Books added (text only)", "For pictures: web page > Add a book");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
 static void reader_open(const app_t *self)
 {
+    import_books();
     load_library(NULL);
     show_library(true);
 }

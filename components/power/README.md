@@ -25,6 +25,14 @@ The **Power** tile in the main menu (`power_app`) calls `power_off()`, which:
 
 `power_app` is marked `no_resume`, so the next start shows the menu, not the Power tile.
 
+### Off screen picture
+
+A picture uploaded on the web page (**Off screen picture**: the browser crops it to 296 x 128
+and saves a greyscale JPEG, kept as `POWER_OFF_PICTURE` in `/store`) replaces the power symbol:
+it's drawn in 4 greys with the status line on a small white label at the bottom. Power-on
+draws the same picture again as the "known" screen, so the quick "Starting..." partial refresh
+still only changes the label.
+
 ## On
 
 Any press of a power button wakes the chip, which boots from scratch. `power_boot_check()`

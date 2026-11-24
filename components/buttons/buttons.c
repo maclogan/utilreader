@@ -2,9 +2,12 @@
 
 #include "driver/gpio.h"                // gpio_config(), gpio_get_level()
 #include "driver/rtc_io.h"              // pull-ups that stay on in deep sleep
+#include "driver/usb_serial_jtag.h"      // testing: keyboard over USB serial (CONFIG_BUTTONS_SERIAL_KEYS)
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_err.h"                    // ESP_ERROR_CHECK()
 #include "esp_log.h"
 #include "esp_sleep.h"                  // wake-up on the BACK / HOME button
+#include <stdint.h>                     // INT64_MAX
 #include "esp_timer.h"                  // esp_timer_get_time(): time since boot
 #include "expander.h"                   // the 5-way switch, on the I2C I/O expander
 #include "freertos/queue.h"             // queue that carries events to app_main
@@ -160,6 +163,160 @@ static void button_task(void *arg)
     }
 }
 
+#if CONFIG_BUTTONS_SERIAL_KEYS
+// ---------- testing: keys typed over USB serial act as buttons ----------
+// Arrow keys arrive as ANSI escape sequences (ESC [ C / ESC [ D, or ESC O C / D).
+static button_event_t key_event(int c)
+{
+    switch (c) {
+    case 'a': case 'j':             return BUTTON_LEFT;
+    case 'A': case 'J':             return BUTTON_LEFT_HOLD;
+    case ',': case '<': case '[':   return BUTTON_LEFT_HOLD;      // previous track: a clean hold
+    case '.': case '>': case ']':   return BUTTON_RIGHT_HOLD;     // next track
+    case 'd': case 'l':             return BUTTON_RIGHT;
+    case 'D': case 'L':             return BUTTON_RIGHT_HOLD;
+    case '\r': case ' ': case 's':  return BUTTON_SELECT;
+    case 'S':                       return BUTTON_SELECT_HOLD;
+    case '\b': case 0x7F: case 'b': return BUTTON_BACK;
+    case 'h': case 'H':             return BUTTON_HOME;
+    default:                        return NO_HOLD;
+    }
+}
+
+// Holding a key down: a terminal only sees the key repeating (after the keyboard's repeat
+// delay, usually 250-1000 ms, then ~30 times a second). For the select keys (Enter, space,
+// 's') the tap waits KEY_TAP_WAIT_MS: if the key repeats by then, it's a hold, like holding
+// the 5-way's center. A keyboard set to a longer repeat delay gives a tap, then the hold.
+#define KEY_TAP_WAIT_MS     650
+#define KEY_REPEAT_GAP_MS   200     // repeats closer than this belong to the same hold
+// Left / right act at once (lists must stay quick). A second press soon after the first waits
+// ARROW_SETTLE_MS: if more follow quickly, the key is being held (auto-repeat): one hold
+// event (skip track, jump a page), and its further repeats are absorbed.
+#define ARROW_MAYBE_MS      750     // a second press this soon may be the start of auto-repeat
+#define ARROW_SETTLE_MS     120     // auto-repeat comes faster than this
+
+static bool is_select_key(uint8_t c)
+{
+    return c == '\r' || c == ' ' || c == 's';
+}
+
+static void serial_key_task(void *arg)
+{
+    int esc = 0;                    // 0 = normal, 1 = after ESC, 2 = after ESC [ or ESC O
+    bool pending = false;           // a select key is down: tap or hold not decided yet
+    bool held = false;              // ... and it has become a hold (absorbing its repeats)
+    int64_t deadline = 0;           // ms: decide (or end the hold) at this time
+    // Left / right
+    button_event_t arrow = NO_HOLD; // the last arrow pressed (BUTTON_LEFT / BUTTON_RIGHT)
+    int64_t arrow_at = 0;           // when
+    bool arrow_pending = false;     // a quick second press, waiting to see if it's auto-repeat
+    bool arrow_held = false;        // auto-repeat seen: absorbing until it stops
+    while (1) {
+        uint8_t c;
+        int64_t now = esp_timer_get_time() / 1000;
+        int64_t next = pending ? deadline : INT64_MAX;
+        if (arrow_pending && arrow_at + ARROW_SETTLE_MS < next) {
+            next = arrow_at + ARROW_SETTLE_MS;
+        }
+        TickType_t wait = next == INT64_MAX ? portMAX_DELAY : pdMS_TO_TICKS(next > now ? next - now : 0) + 1;
+        if (usb_serial_jtag_read_bytes(&c, 1, wait) != 1) {
+            now = esp_timer_get_time() / 1000;
+            if (pending && now >= deadline) {
+                if (!held) {
+                    ESP_LOGI(TAG, "key select (tap)%s", locked ? " (locked, ignored)" : "");
+                    press(BUTTON_SELECT);
+                }
+                pending = held = false;
+            }
+            if (arrow_pending && now >= arrow_at + ARROW_SETTLE_MS) {
+                arrow_pending = false;                      // just a second press: a tap after all
+                ESP_LOGI(TAG, "key %s (tap)", arrow == BUTTON_LEFT ? "left" : "right");
+                press(arrow);
+            }
+            continue;
+        }
+        now = esp_timer_get_time() / 1000;
+        if (c == '\n') {
+            continue;                                       // the second half of a CR LF Enter
+        }
+        if (esc == 0 && is_select_key(c)) {
+            if (!pending) {
+                pending = true;                             // wait: tap or hold?
+                held = false;
+                deadline = now + KEY_TAP_WAIT_MS;
+            } else {
+                if (!held) {
+                    held = true;
+                    ESP_LOGI(TAG, "key select (held)%s", locked ? " (locked, ignored)" : "");
+                    press(BUTTON_SELECT_HOLD);
+                }
+                deadline = now + KEY_REPEAT_GAP_MS;         // still repeating: still the same hold
+            }
+            continue;
+        }
+        button_event_t e = NO_HOLD;
+        if (esc == 1) {
+            esc = (c == '[' || c == 'O') ? 2 : 0;
+        } else if (esc == 2) {
+            esc = 0;
+            if (c == 'D') e = BUTTON_LEFT;
+            else if (c == 'C') e = BUTTON_RIGHT;
+        } else if (c == 0x1B) {
+            esc = 1;
+        } else {
+            e = key_event(c);
+        }
+        if (e == BUTTON_LEFT || e == BUTTON_RIGHT) {
+            if (arrow_held && e == arrow && now - arrow_at < KEY_REPEAT_GAP_MS) {
+                arrow_at = now;                             // still held: absorb
+                continue;
+            }
+            if (arrow_pending && e == arrow && now - arrow_at < ARROW_SETTLE_MS) {
+                arrow_pending = false;                      // auto-repeat: it's a hold
+                arrow_held = true;
+                arrow_at = now;
+                ESP_LOGI(TAG, "key %s (held)", e == BUTTON_LEFT ? "left" : "right");
+                press(e == BUTTON_LEFT ? BUTTON_LEFT_HOLD : BUTTON_RIGHT_HOLD);
+                continue;
+            }
+            if (arrow_pending) {                            // a different key: the waiting tap goes first
+                arrow_pending = false;
+                press(arrow);
+            }
+            arrow_held = false;
+            bool maybe_repeat = e == arrow && now - arrow_at < ARROW_MAYBE_MS;
+            arrow = e;
+            arrow_at = now;
+            if (maybe_repeat) {
+                arrow_pending = true;                       // decided in ARROW_SETTLE_MS
+                continue;
+            }
+            ESP_LOGI(TAG, "key %s", e == BUTTON_LEFT ? "left" : "right");
+            press(e);
+            continue;
+        }
+        if (e != NO_HOLD) {
+            ESP_LOGI(TAG, "key '%c' -> event %d%s", c >= ' ' && c < 0x7F ? c : '?', e,
+                     locked ? " (locked, ignored)" : "");
+            press(e);
+        }
+    }
+}
+
+static void serial_keys_start(void)
+{
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    if (usb_serial_jtag_driver_install(&cfg) != ESP_OK) {
+        ESP_LOGW(TAG, "serial keys: USB serial driver install failed");
+        return;
+    }
+    usb_serial_jtag_vfs_use_driver();   // logs go through the driver too, so they don't collide
+    xTaskCreate(serial_key_task, "serial_keys", 3072, NULL, 5, NULL);
+    ESP_LOGW(TAG, "serial keys ON: arrows/a/d = left/right, Enter/space = select, "
+                  "Backspace/b = back, h = home, A/D/S or held keys = holds, , . = previous / next track");
+}
+#endif
+
 // Inputs with pull-ups. Pins armed for deep-sleep wake-up are handed back from the RTC
 // domain first.
 static void config_inputs(uint64_t mask)
@@ -201,6 +358,9 @@ void buttons_init(void)
 
     events = xQueueCreate(8, sizeof(button_event_t));       // room for 8 unhandled presses
     xTaskCreate(button_task, "buttons", 2048, NULL, 5, NULL);  // 2 KB stack, medium priority
+#if CONFIG_BUTTONS_SERIAL_KEYS
+    serial_keys_start();
+#endif
 }
 
 bool buttons_wait(button_event_t *event, TickType_t timeout)

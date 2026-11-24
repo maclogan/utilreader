@@ -5,8 +5,13 @@
 
 static const char *TAG = "storage";
 
+static bool mounted;
+
 bool storage_init(void)
 {
+    if (mounted) {
+        return true;                                        // already (power-on mounts it early)
+    }
     esp_vfs_spiffs_conf_t conf = {
         .base_path = STORAGE_PATH,
         .partition_label = "storage",                       // see partitions.csv
@@ -18,5 +23,6 @@ bool storage_init(void)
         ESP_LOGE(TAG, "mount failed: %s", esp_err_to_name(err));
         return false;
     }
+    mounted = true;
     return true;
 }

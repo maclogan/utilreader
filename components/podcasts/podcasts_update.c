@@ -2,6 +2,7 @@
 // own task (downloads take minutes; the shared worker would be blocked).
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -155,6 +156,7 @@ typedef struct {
     rss_item_t *items;
     int n, max;
     char title[96];
+    char image[400];                    // the show's artwork, "" if none
     bool stop_early;                    // newest-N feed: enough items once newest-first is clear
     bool ascending;                     // an item newer than the one before: oldest-first feed
 } parse_ctx_t;
@@ -163,6 +165,88 @@ static void on_channel_title(void *arg, const char *title)
 {
     parse_ctx_t *p = arg;
     snprintf(p->title, sizeof(p->title), "%s", title);
+}
+
+static void on_channel_image(void *arg, const char *url)
+{
+    parse_ctx_t *p = arg;
+    snprintf(p->image, sizeof(p->image), "%s", url);
+}
+
+// The show's artwork as <feed>/cover.jpg, which Now Playing shows for its episodes (as it
+// does a music folder's cover.jpg). Fetched once per artwork URL (remembered in cover.url).
+// Only JPEGs are kept: the device can't decode PNGs.
+#define COVER_MAX (4 * 1024 * 1024)
+
+static void fetch_cover(const char *feed_id, const char *url)
+{
+    char mark[224], tmp[224], dest[224], old[400] = "";
+    snprintf(mark, sizeof(mark), "%s/%s/cover.url", podcasts_root(), feed_id);
+    snprintf(tmp, sizeof(tmp), "%s/%s/cover.tmp", podcasts_root(), feed_id);
+    snprintf(dest, sizeof(dest), "%s/%s/cover.jpg", podcasts_root(), feed_id);
+    FILE *f = fopen(mark, "r");
+    if (f) {
+        if (fgets(old, sizeof(old), f) == NULL) {
+            old[0] = '\0';
+        }
+        fclose(f);
+    }
+    if (!strcmp(old, url)) {
+        return;                                             // already have it (or know it's no use)
+    }
+    if (!strcmp(url, "-")) {                                // the feed has no artwork: remember that
+        f = fopen(mark, "w");
+        if (f) {
+            fputs(url, f);
+            fclose(f);
+        }
+        return;
+    }
+    hdrs_t h = {0};
+    int status = 0;
+    int64_t len = 0;
+    esp_http_client_handle_t c = http_open(url, NULL, NULL, NULL, &h, &status, &len);
+    if (c == NULL) {
+        return;                                             // network: try again next update
+    }
+    bool jpeg = false;
+    if (status == 200 && len <= COVER_MAX) {
+        char *buf = malloc(4096);
+        FILE *out = buf ? fopen(tmp, "wb") : NULL;
+        int r, total = 0;
+        while (out && !stop_requested && total < COVER_MAX && (r = esp_http_client_read(c, buf, 4096)) > 0) {
+            if (total == 0) {
+                jpeg = r >= 3 && (uint8_t)buf[0] == 0xFF && (uint8_t)buf[1] == 0xD8 && (uint8_t)buf[2] == 0xFF;
+            }
+            if (fwrite(buf, 1, r, out) != (size_t)r) {
+                jpeg = false;                               // card full
+                break;
+            }
+            total += r;
+        }
+        if (out) {
+            fclose(out);
+        }
+        free(buf);
+        if (stop_requested) {
+            jpeg = false;
+            status = 0;                                     // incomplete: try again next time
+        }
+    }
+    http_close(c);
+    if (jpeg) {
+        remove(dest);
+        jpeg = rename(tmp, dest) == 0;
+    }
+    remove(tmp);
+    if (status == 200) {
+        f = fopen(mark, "w");
+        if (f) {
+            fputs(url, f);
+            fclose(f);
+        }
+    }
+    ESP_LOGI(TAG, "%s: artwork %s", feed_id, jpeg ? "saved" : "not usable (not a JPEG?)");
 }
 
 static bool on_item(void *arg, const rss_item_t *it)
@@ -284,7 +368,13 @@ static void refresh_feed(const pod_feed_t *feed)
     if (ctx.items == NULL || buf == NULL) {
         snprintf(error, sizeof(error), "Out of memory");
     } else {
-        esp_http_client_handle_t c = http_open(feed->url, NULL, feed->etag, feed->last_modified, &h, &status, &len);
+        // No artwork looked for yet (feeds added before artwork support): fetch in full once
+        char mark[224];
+        struct stat sb;
+        snprintf(mark, sizeof(mark), "%s/%s/cover.url", podcasts_root(), feed->id);
+        bool fresh = stat(mark, &sb) != 0;
+        esp_http_client_handle_t c = http_open(feed->url, NULL, fresh ? NULL : feed->etag,
+                                               fresh ? NULL : feed->last_modified, &h, &status, &len);
         if (c == NULL) {
             snprintf(error, sizeof(error), "Can't reach the feed");
         } else if (status == 304) {
@@ -293,7 +383,8 @@ static void refresh_feed(const pod_feed_t *feed)
             snprintf(error, sizeof(error), "Feed answered HTTP %d", status);
             http_close(c);
         } else {
-            rss_callbacks_t cb = {.channel_title = on_channel_title, .item = on_item, .ctx = &ctx};
+            rss_callbacks_t cb = {.channel_title = on_channel_title, .channel_image = on_channel_image,
+                                 .item = on_item, .ctx = &ctx};
             rss_parser_t *p = rss_new(&cb);
             int r;
             while (p && (r = esp_http_client_read(c, buf, 4096)) > 0 && rss_feed(p, buf, r)) {
@@ -307,6 +398,9 @@ static void refresh_feed(const pod_feed_t *feed)
         }
     }
     int added = changed && ctx.n ? merge(feed->id, ctx.items, ctx.n) : 0;
+    if (changed && ctx.n) {
+        fetch_cover(feed->id, ctx.image[0] ? ctx.image : "-");  // merge() made the feed's folder
+    }
     ESP_LOGI(TAG, "%s: HTTP %d, %d items read, %d new", feed->title[0] ? feed->title : feed->url, status, ctx.n, added);
 
     // Write back what was learned, onto the latest copy (the web page may have edited it)
@@ -348,7 +442,7 @@ static bool card_has_room(void)
 // Downloads one episode, resuming a .part file if the server allows. True when complete.
 static bool download(const char *feed_id, pod_episode_t *e)
 {
-    char part[128], done[128], range[40];
+    char part[224], done[224], range[40];
     podcasts_episode_path(feed_id, e, true, part, sizeof(part));
     podcasts_episode_path(feed_id, e, false, done, sizeof(done));
     struct stat sb;
@@ -378,13 +472,30 @@ static bool download(const char *feed_id, pod_episode_t *e)
     if (status == 200) {
         have = 0;                                           // no resume: from the start
     }
-    FILE *f = fopen(part, have ? "ab" : "wb");
+    // The buffer: internal DMA memory makes card writes fastest, but Wi-Fi and TLS use most of
+    // it, so fall back to PSRAM (the SD driver copies through a small bounce buffer then)
     uint8_t *buf = heap_caps_malloc(DL_BUF, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (f == NULL || buf == NULL) {
-        if (f) fclose(f);
+    if (buf == NULL) {
+        buf = heap_caps_malloc(DL_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (buf == NULL) {
+        http_close(c);
+        ESP_LOGW(TAG, "no memory for the download buffer (%d bytes)", DL_BUF);
+        set_message("Out of memory for the download");
+        return false;
+    }
+    FILE *f = fopen(part, have ? "ab" : "wb");
+    if (f == NULL) {
+        ESP_LOGW(TAG, "can't open %s: %s", part, strerror(errno));
+        if (!sdcard_mount()) {
+            set_message("No card (or it can't be read)");
+        } else {
+            char m[64];
+            snprintf(m, sizeof(m), "Can't write to the card: %s", strerror(errno));
+            set_message(m);
+        }
         free(buf);
         http_close(c);
-        set_message("Can't write to the card");
         return false;
     }
     uint64_t total = len > 0 ? have + (uint64_t)len : e->length;

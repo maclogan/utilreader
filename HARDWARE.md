@@ -18,7 +18,7 @@ see also the [wiki](https://docs.waveshare.com/ESP32-S3-LR1121-ePaper-2.9).
 | SH1.0 14-pin cable | Yes | To reach header P2. See [Connecting to the header](#connecting-to-the-header): Waveshare ships one, otherwise build it from a housing and pre-crimped leads |
 | Small perfboard + female pin headers | Recommended | The hub the cable and the modules plug into |
 | Adafruit TLV320DAC3100 | For music | I2S DAC with headphone amp and 3.5 mm jack, I2C 0x18 |
-| INMP441 I2S microphone | Not yet used | Wired now for a future app |
+| INMP441 I2S microphone | For voice notes | The Voice app records from it |
 | microSD card | For music | FAT32, music in a folder (default `/Music`, set in **Settings**). Goes in the board's own slot |
 | Headphones | For music | 16-32 Ω. The TLV320's speaker output needs 5 V and isn't used |
 | USB-C cable | Yes | Power, charging, flashing, logs |
@@ -44,7 +44,7 @@ Pin order from the schematic; confirm it against the silkscreen before wiring.
 | 5 | 3V3 | Power for the expander, DAC and microphone |
 | 6 | GND | Controls' common / ground side, modules' GND |
 | 7 | GPIO2 | **BACK / HOME button** |
-| 8 | GPIO3 | **Microphone data** (INMP441 SD), for a future app |
+| 8 | GPIO3 | **Microphone data** (INMP441 SD), for voice notes |
 | 9 | GPIO4 | **I2S bit clock** (TLV320 BCK + INMP441 SCK) |
 | 10 | GPIO5 | **I2S word select** (TLV320 WSEL + INMP441 WS) |
 | 11 | SDA (GPIO13) | I2C bus: fuel gauge, clock chip (onboard), expander, DAC. 4.7k pull-ups on the board |
@@ -271,7 +271,7 @@ out. Plug in USB and press RESET to start again.
 | 0 | BOOT button | Strapping pin |
 | 1 | KEY button | = BACK / HOME; 10k pull-up on the board; wakes from off |
 | 2 | **BACK / HOME** (header) | Wakes from off |
-| 3 | **Microphone data** (header) | INMP441 SD; I2S input, not used yet |
+| 3 | **Microphone data** (header) | INMP441 SD; I2S input (Voice app) |
 | 4 | **I2S bit clock** (header) | TLV320 BCK + INMP441 SCK |
 | 5 | **I2S word select** (header) | TLV320 WSEL + INMP441 WS |
 | 6 | LR1121 DIO1 | Radio idle; floated when off |

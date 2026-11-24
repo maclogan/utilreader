@@ -44,6 +44,7 @@ typedef struct {
     char title[128];                    // the tag, or the file name
     char artist[96];
     char album[96];
+    char path[320];                     // the file playing ("" if none)
     media_format_t format;
     uint32_t rate;                      // 0 until the first audio is decoded
     uint8_t bits, channels;

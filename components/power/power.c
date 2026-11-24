@@ -5,6 +5,8 @@
 #include "sdcard.h"                     // sdcard_unmount()
 #include "epd.h"                        // the "off" screen, epd_power_down()
 #include "esp_log.h"
+#include "image.h"                      // the "off" picture
+#include "storage.h"                    // where it's kept
 #include "esp_sleep.h"                  // deep sleep and the wake-up cause
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"              // vTaskDelay()
@@ -30,12 +32,39 @@ static void power_icon(const app_t *self, int cx, int cy)
     draw_power_symbol(cx, cy, 13, 3);
 }
 
-// The screen left showing while off. `status` is the line under the symbol.
+// The "off" picture, decoded once (the screen is drawn twice at power-on)
+static image_grey_t picture;
+static bool picture_tried;
+
+static bool load_picture(void)
+{
+    if (!picture_tried) {
+        picture_tried = true;
+        storage_init();                                     // at power-on this runs before main mounts it
+        if (image_jpeg_grey_file(POWER_OFF_PICTURE, EPD_WIDTH, EPD_HEIGHT, &picture)) {
+            image_auto_levels(&picture);
+        }
+    }
+    return picture.pix != NULL;
+}
+
+// The screen left showing while off: the uploaded picture in 4 greys, or the power symbol.
+// `status` is the line at the bottom.
 static void draw_off_screen(const char *status)
 {
     epd_clear(EPD_WHITE);
+    int tw = epd_text_width(status, 1);
+    if (load_picture()) {
+        epd_draw_grey8((EPD_WIDTH - picture.w) / 2, (EPD_HEIGHT - picture.h) / 2, picture.w, picture.h,
+                       picture.pix, picture.w, true);
+        int bx = (EPD_WIDTH - tw) / 2 - 4;                  // status on a white label
+        epd_draw_rect(bx, EPD_HEIGHT - 14, tw + 8, 13, EPD_WHITE, true);
+        epd_draw_rect(bx, EPD_HEIGHT - 14, tw + 8, 13, EPD_BLACK, false);
+        epd_draw_text(bx + 4, EPD_HEIGHT - 11, status, 1, EPD_BLACK);
+        return;
+    }
     draw_power_symbol(EPD_WIDTH / 2, 48, 26, 5);
-    epd_draw_text((EPD_WIDTH - epd_text_width(status, 1)) / 2, 100, status, 1, EPD_BLACK);
+    epd_draw_text((EPD_WIDTH - tw) / 2, 100, status, 1, EPD_BLACK);
 }
 
 void power_boot_check(void)
@@ -75,6 +104,8 @@ void power_add_off_hook(void (*fn)(void))
 void power_off(void)
 {
     ESP_LOGI(TAG, "turning off");
+    picture_tried = false;                                  // pick up a newly uploaded picture
+    image_free(&picture);
     for (int i = 0; i < MAX_OFF_HOOKS && off_hooks[i]; i++) {
         off_hooks[i]();                                     // e.g. music: stop, DAC off, save place
     }

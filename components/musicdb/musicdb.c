@@ -417,8 +417,14 @@ static void build_indexes(void)
     free(tmp);
 }
 
+static volatile bool stale;             // files changed since the scan (musicdb_set_stale)
+
+void musicdb_set_stale(void) { stale = true; }
+bool musicdb_stale(void) { return stale; }
+
 musicdb_status_t musicdb_scan(const char *dir, void (*progress)(int done, int total))
 {
+    stale = false;
     musicdb_lock();
     arena_free();
     count = artist_count = album_count = 0;

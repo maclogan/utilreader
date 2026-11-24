@@ -12,10 +12,9 @@
 #define LEFT        (UI_CONTENT_X + MARGIN)  // left edge of text
 #define TEXT_Y      3                   // top of the first text row
 #define ROW_H       19                  // 16 px characters + room for the new-word underline
-#define TEXT_ROWS   4                   // rows of text that fit above the lookup area
-#define LOOKUP_LINE 85                  // rule above the pinyin/meaning area
-#define PINYIN_Y    89
-#define MEANING_Y   108
+#define TEXT_ROWS   6                   // rows of text: the whole height (the lookup box floats over it)
+#define BOX_H       44                  // the lookup box: pinyin and meaning, over the text
+#define BOX_PAD     4
 
 // True for Chinese punctuation, which may hang past the right margin rather than start a row
 static bool is_punctuation(uint32_t cp)
@@ -24,9 +23,9 @@ static bool is_punctuation(uint32_t cp)
 }
 
 // Story menu layout
-#define ITEM_Y      6                   // top of the first item
-#define ITEM_H      25                  // item spacing (4 items fit)
-#define ITEM_BOX_H  23                  // highlight bar height
+#define ITEM_Y      4                   // top of the first item
+#define ITEM_H      24                  // item spacing (5 items fit)
+#define ITEM_BOX_H  22                  // highlight bar height
 
 // Saved words layout: each entry is word + pinyin on one row, meaning below
 #define SAVED_Y     13                  // top of the first entry
@@ -83,10 +82,14 @@ static void finish(bool full)
 
 // Lays out tokens first..first+count-1 as running text, wrapping by character.
 // draw = true draws them (rows past TEXT_ROWS are cut off); draw = false only measures.
-// Returns the number of rows the text needs.
-static int layout(const story_t *s, int first, int count, int cursor, bool draw)
+// Returns the number of rows the text needs. *cursor_row (may be NULL) gets the row the cursor
+// word starts on (-1 if it isn't on this page).
+static int layout(const story_t *s, int first, int count, int cursor, bool draw, int *cursor_row)
 {
     int x = LEFT, row = 0;
+    if (cursor_row) {
+        *cursor_row = -1;
+    }
 
     for (int i = first; i < first + count; i++) {
         const story_token_t *t = &s->tokens[i];
@@ -100,6 +103,9 @@ static int layout(const story_t *s, int first, int count, int cursor, bool draw)
                 row++;
             }
             int y = TEXT_Y + row * ROW_H;
+            if (highlighted && cursor_row && *cursor_row < 0) {
+                *cursor_row = row;
+            }
             if (!draw || row >= TEXT_ROWS) {
                 x += w;                                     // measuring, or past the bottom
                 continue;
@@ -128,7 +134,7 @@ void story_ui_paginate(story_t *s)
         int count = s->sentences[i].count;
         for (i++; i < s->sentence_count; i++) {
             int with_next = s->sentences[i].first + s->sentences[i].count - first;
-            if (layout(s, first, with_next, -1, false) > TEXT_ROWS) {
+            if (layout(s, first, with_next, -1, false, NULL) > TEXT_ROWS) {
                 break;
             }
             count = with_next;
@@ -145,21 +151,30 @@ void story_ui_show(const story_t *s, int page, int cursor, bool full)
     snprintf(page_text, sizeof(page_text), "%d/%d", page + 1, s->page_count);
     draw_header(s->title, page_text);
 
-    layout(s, s->pages[page].first, s->pages[page].count, cursor, true);
+    int cursor_row;
+    layout(s, s->pages[page].first, s->pages[page].count, cursor, true, &cursor_row);
 
-    // Lookup area: the highlighted word's pinyin and meaning
-    epd_draw_hline(UI_CONTENT_X, LOOKUP_LINE, UI_CONTENT_W, EPD_BLACK);
+    // The lookup box, only while a word is selected: pinyin and meaning in a bordered box over
+    // the text, at the bottom, or at the top when the selected word would be under it
     if (cursor >= 0) {
         const story_token_t *t = &s->tokens[cursor];
-        int tag_x = EPD_WIDTH - MARGIN;
+        int word_top = TEXT_Y + (cursor_row < 0 ? 0 : cursor_row) * ROW_H - 1;
+        int word_bottom = word_top + ROW_H + 1;
+        int box_y = word_bottom > EPD_HEIGHT - BOX_H ? 0 : EPD_HEIGHT - BOX_H;
+        (void)word_top;
+        epd_draw_rect(UI_CONTENT_X, box_y, UI_CONTENT_W, BOX_H, EPD_WHITE, true);
+        epd_draw_rect(UI_CONTENT_X, box_y, UI_CONTENT_W, BOX_H, EPD_BLACK, false);
+        epd_draw_rect(UI_CONTENT_X + 1, box_y + 1, UI_CONTENT_W - 2, BOX_H - 2, EPD_BLACK, false);
+        int pinyin_y = box_y + BOX_PAD, meaning_y = box_y + BOX_PAD + 19;
+        int tag_x = EPD_WIDTH - MARGIN - 2;
         if (review_contains(t->w)) {
-            tag_x = draw_tag(tag_x, PINYIN_Y + 3, "SAVED", EPD_BLACK) - 4;
+            tag_x = draw_tag(tag_x, pinyin_y + 3, "SAVED", EPD_BLACK) - 4;
         }
         if (t->is_new) {
-            draw_tag(tag_x, PINYIN_Y + 3, "NEW", EPD_BLACK);
+            draw_tag(tag_x, pinyin_y + 3, "NEW", EPD_BLACK);
         }
-        font16_draw_text(LEFT, PINYIN_Y, t->p, EPD_BLACK);
-        draw_clipped(LEFT, MEANING_Y, t->d, EPD_BLACK);
+        font16_draw_text(LEFT + 2, pinyin_y, t->p, EPD_BLACK);
+        draw_clipped(LEFT + 2, meaning_y, t->d, EPD_BLACK);
     }
 
     finish(full);

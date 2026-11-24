@@ -10,6 +10,8 @@
     :root { --bg:#161615; --card:#21211f; --ink:#ececea; --mute:#9a9a94; --line:#3a3a37; --accent:#8db4dc; --bad:#e88; }
   }
   * { box-sizing: border-box; }
+  a, a:visited { color: var(--ink); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+  a:hover { color: var(--accent); }
   body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   main { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
@@ -42,6 +44,22 @@
   .err { color: var(--bad); }
   pre.preview { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 140px; overflow: auto; font: inherit; margin: 8px 0; }
   .hidden { display: none; }
+  .drag { cursor: grab; touch-action: none; user-select: none; font-size: 20px; line-height: 1; color: var(--muted, #888); padding: 6px 10px; }
+  .drag:active { cursor: grabbing; }
+  .mpages { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 12px; }
+  .mpage { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .mpage .num { grid-column: 1 / -1; font-size: 12px; color: var(--mute); }
+  .mtile { width: 66px; height: 44px; border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+    display: flex; align-items: flex-end; justify-content: center; padding-bottom: 4px; font-size: 12px;
+    user-select: none; touch-action: none; cursor: grab; overflow: hidden; white-space: nowrap; }
+  .mtile.sys { cursor: default; opacity: .65; }
+  .mtile.empty { border-style: dashed; background: transparent; cursor: default; }
+  .mtile.dragging { outline: 2px dashed var(--accent); opacity: .7; }
+  section.dropping { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  #dropstatus { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(640px, 92vw);
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    box-shadow: 0 4px 18px rgba(0,0,0,.25); z-index: 10; }
+  tr.dragging { opacity: .7; background: var(--bg); outline: 2px dashed var(--accent); }
   .scroll { max-height: 420px; overflow: auto; }
   input.code { font-size: 28px; letter-spacing: 6px; width: 9ch; text-align: center; font-variant-numeric: tabular-nums; }
 </style>
@@ -65,8 +83,22 @@
   <div id="app" class="hidden">
   <section>
     <h2>Apps</h2>
-    <p class="muted">The board's menu, in order. ↑ ↓ move an app, the checkbox shows or hides it (hidden apps
-      keep working in the background). Transfer and Power always stay.</p>
+    <p class="muted">The board's menu, in order. Drag an app by its ⠿ handle to move it (mouse or finger); the
+      checkbox shows or hides it (hidden apps keep working in the background). Transfer, Settings and Power always
+      stay at the end. The board's menu changes as soon as you let go.</p>
+    <div class="row">
+      <label>Home screen
+        <select id="menulayout">
+          <option value="1x4">1 row of 4</option>
+          <option value="1x5">1 row of 5</option>
+          <option value="2x3">2 rows of 3</option>
+          <option value="2x4">2 rows of 4</option>
+          <option value="2x5">2 rows of 5</option>
+        </select>
+      </label>
+      <span class="muted">Drag the tiles below to arrange the board's menu, page by page.</span>
+    </div>
+    <div id="menupreview" class="mpages"></div>
     <div id="apps" class="muted">Loading…</div>
     <div id="appform" class="form hidden"></div>
     <div id="logbox" class="hidden">
@@ -111,9 +143,12 @@
   <section>
     <h2>Add a book</h2>
     <p class="muted">A <b>.txt</b> (UTF-8 or GB18030/GBK), <b>.epub</b> or <b>.html</b> file. It's converted here in
-      the browser to plain text the device can show (no images, tidy paragraphs, only characters its font has),
-      with chapters marked from the book's table of contents or its chapter headings, then sent in small pieces.</p>
-    <input type="file" id="file" accept=".txt,.epub,.html,.htm">
+      the browser to plain text the device can show (tidy paragraphs, only characters its font has),
+      with chapters marked from the book's table of contents or its chapter headings, then sent in small pieces.
+      An e-book's cover and pictures come along as small greyscale images, each on a page of its own.</p>
+    <input type="file" id="file" accept=".txt,.epub,.html,.htm" multiple>
+    <p class="muted">Pick several to add them all at once, or drop files anywhere on this page: books, music,
+      app packages (.zip), podcast lists (.opml) and pictures each go where they belong.</p>
     <div id="converted" class="hidden">
       <p id="stats" class="muted"></p>
       <label>Title <input type="text" id="title"></label>
@@ -124,6 +159,57 @@
         <span id="status" class="muted"></span>
       </div>
     </div>
+  </section>
+
+  <section>
+    <h2>Off screen picture</h2>
+    <p class="muted">A photo to show while the device is off, in 4 shades of grey. Choose the part to show here
+      in the browser (the screen is 296 × 128). Takes effect the next time the device turns off.</p>
+    <input type="file" id="offfile" accept="image/*">
+    <div id="offconverted" class="hidden">
+      <p class="muted" style="margin-bottom:4px">Drag the frame to choose what shows; the slider (or the mouse wheel) sizes it.</p>
+      <canvas id="offcrop" style="max-width:100%; touch-action:none; cursor:move; border:1px solid var(--line)"></canvas>
+      <div class="row">
+        <label>Size <input type="range" id="offzoom" min="15" max="100" value="100"></label>
+        <button class="small" id="offrotate">Rotate 90°</button>
+      </div>
+      <p class="muted" style="margin:8px 0 4px">On the device:</p>
+      <canvas id="offpreview" width="296" height="128" style="border:1px solid #888; image-rendering:pixelated; width:592px; max-width:100%"></canvas>
+      <div class="row">
+        <button class="primary" id="offupload">Send to the device</button>
+        <span id="offstatus" class="muted"></span>
+      </div>
+    </div>
+    <p><button id="offremove">Remove the picture</button> <span class="muted">(back to the power symbol)</span></p>
+  </section>
+
+  <div id="dropstatus" class="hidden">
+    <div class="row"><b id="droptitle">Uploading</b><span class="grow"></span>
+      <button class="small" id="dropcancel">Cancel</button><button class="small hidden" id="dropclose">Close</button></div>
+    <div class="bar" style="margin-top:6px"><div id="dropprogress"></div></div>
+    <div id="dropdetail" class="muted" style="margin-top:6px; white-space:pre-line"></div>
+  </div>
+
+  <section id="sdsection">
+    <h2>SD card <span class="muted" id="sdspace"></span></h2>
+    <p class="muted">Browse the microSD card over Wi-Fi. Drop files or whole folders anywhere on this box to upload
+      them into the folder shown. The device keeps working meanwhile (a file that's playing is stopped before it's
+      deleted or replaced). After adding music, use <b>Rescan</b> in the Music app.</p>
+    <div class="row">
+      <button class="small" id="sdup">↑ Up</button>
+      <div class="grow" id="sdcrumbs"></div>
+      <button class="small" id="sdmkdir">New folder</button>
+      <button class="small" id="sdpick">Upload files</button>
+      <button class="small" id="sdpickdir">Upload folder</button>
+      <input type="file" id="sdfiles" multiple class="hidden">
+      <input type="file" id="sddir" webkitdirectory class="hidden">
+    </div>
+    <div class="row" id="sdprogressrow" style="margin-top:8px">
+      <div class="grow"><div class="bar"><div id="sdprogress"></div></div></div>
+      <span id="sdstatus" class="muted"></span>
+      <button class="small hidden" id="sdcancel">Cancel</button>
+    </div>
+    <div id="sdlist" class="muted" style="margin-top:8px">Loading…</div>
   </section>
 
   <section>
@@ -245,8 +331,10 @@ async function getJSON(url, opts) {
   return r.json();
 }
 
+let pictureGamma = 0.65;   // the device lightens pictures this much before dithering (menuconfig)
 async function loadInfo() {
   const i = await getJSON("/api/info");
+  if (i.picture_gamma) pictureGamma = i.picture_gamma;
   if (i.app_api) boardApi = i.app_api;
   $("space").textContent = `${i.ip} · books: ${kb(i.total - i.free)} used, ${kb(i.free)} free`;
 }
@@ -295,17 +383,73 @@ const updateFor = id => {
   return c && have && compareVersions(c.version, have.version) > 0 && c.api <= boardApi ? c : null;
 };
 
+// The board's home screen as pages of tiles (hidden apps left out), in the chosen layout.
+// Regular apps can be dragged to any position; Transfer, Settings and Power stay at the end.
+let menuLayout = { rows: 2, cols: 4 };
+async function drawMenuPreview(menu, save, hiddenNow) {
+  const info = await getJSON("/api/info").catch(() => ({}));
+  if (info.menu_rows) menuLayout = { rows: info.menu_rows, cols: info.menu_cols };
+  $("menulayout").value = `${menuLayout.rows}x${menuLayout.cols}`;
+  const shown = menu.filter(m => !m.hidden);
+  const per = menuLayout.rows * menuLayout.cols, pages = Math.max(1, Math.ceil(shown.length / per));
+  let html = "";
+  for (let p = 0; p < pages; p++) {
+    html += `<div class="mpage" style="grid-template-columns: repeat(${menuLayout.cols}, auto)">` +
+      (pages > 1 ? `<div class="num">Page ${p + 1}</div>` : "");
+    for (let i = p * per; i < (p + 1) * per; i++) {
+      const m = shown[i];
+      html += m ? `<div class="mtile${m.system ? " sys" : ""}" data-id="${esc(m.id)}" title="${esc(m.name)}">${esc(m.name)}</div>`
+                : `<div class="mtile empty"></div>`;
+    }
+    html += `</div>`;
+  }
+  $("menupreview").innerHTML = html;
+
+  // Drag a tile onto another one's place: it moves there, the others shift along
+  const box = $("menupreview");
+  box.querySelectorAll(".mtile[data-id]:not(.sys)").forEach(t => t.onpointerdown = e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+    t.classList.add("dragging");
+    t.setPointerCapture(e.pointerId);
+    let target = null;
+    t.onpointermove = ev => {
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const over = el && el.closest && el.closest(".mtile[data-id]:not(.sys)");
+      box.querySelectorAll(".mtile").forEach(x => x.style.outline = "");
+      target = over && over !== t ? over : null;
+      if (target) target.style.outline = "2px solid var(--accent)";
+    };
+    t.onpointerup = t.onpointercancel = () => {
+      t.onpointermove = t.onpointerup = t.onpointercancel = null;
+      t.classList.remove("dragging");
+      box.querySelectorAll(".mtile").forEach(x => x.style.outline = "");
+      if (!target) return;
+      const order = menu.filter(m => !m.system).map(m => m.id);
+      const from = order.indexOf(t.dataset.id), to = order.indexOf(target.dataset.id);
+      if (from < 0 || to < 0) return;
+      order.splice(to, 0, order.splice(from, 1)[0]);
+      save(order, hiddenNow());
+    };
+  });
+}
+
+$("menulayout").onchange = async () => {
+  const [rows, cols] = $("menulayout").value.split("x").map(Number);
+  const r = await api(`/api/menu/layout?rows=${rows}&cols=${cols}`, { method: "POST" }).catch(() => null);
+  if (!r || !r.ok) { alert("Couldn't change the layout"); return; }
+  loadApps().catch(() => {});
+};
+
 async function loadApps() {
   const [menu, apps] = await Promise.all([getJSON("/api/menu"), getJSON("/api/apps")]);
   installed = new Map(apps.map(a => [a.id, a]));
   const regular = menu.filter(m => !m.system);
   $("apps").innerHTML = `<table><tr><th></th><th>Show</th><th>App</th><th>About</th><th></th></tr>` +
     menu.map(m => {
-      const a = installed.get(m.id), up = updateFor(m.id), i = regular.indexOf(m);
-      const move = m.system ? "" :
-        `<button class="small" data-up="${i}" ${i === 0 ? "disabled" : ""}>↑</button>` +
-        `<button class="small" data-down="${i}" ${i === regular.length - 1 ? "disabled" : ""}>↓</button>`;
-      return `<tr><td style="white-space:nowrap">${move}</td>` +
+      const a = installed.get(m.id), up = updateFor(m.id);
+      const handle = m.system ? `<td></td>` : `<td class="drag" data-drag title="Drag to move">⠿</td>`;
+      return `<tr data-id="${esc(m.id)}"${m.system ? "" : ` class="reg"`}>${handle}` +
         `<td><input type="checkbox" data-show="${esc(m.id)}" ${m.hidden ? "" : "checked"} ${m.can_hide ? "" : "disabled"}></td>` +
         `<td><b>${esc(m.name)}</b><br><span class="muted">${m.native ? "built in" : esc(m.id + " " + ((a && a.version) || ""))}</span></td>` +
         `<td>${a ? esc(a.description || "") + (a.author ? `<br><span class="muted">by ${esc(a.author)}</span>` : "") : ""}` +
@@ -324,10 +468,29 @@ async function loadApps() {
   };
   const hiddenNow = () => menu.filter(m => m.hidden).map(m => m.id);
   const orderNow = () => regular.map(m => m.id);
-  $("apps").querySelectorAll("[data-up],[data-down]").forEach(b => b.onclick = () => {
-    const order = orderNow(), i = +(b.dataset.up ?? b.dataset.down), j = b.dataset.up !== undefined ? i - 1 : i + 1;
-    [order[i], order[j]] = [order[j], order[i]];
-    save(order, hiddenNow());
+  drawMenuPreview(menu, save, hiddenNow);
+  // Drag to reorder: the row follows the pointer among the regular apps; the order is sent on release
+  const table = $("apps").querySelector("table");
+  table.querySelectorAll("[data-drag]").forEach(h => h.onpointerdown = e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+    const row = h.closest("tr"), before = orderNow().join();
+    row.classList.add("dragging");
+    h.setPointerCapture(e.pointerId);
+    h.onpointermove = ev => {
+      const rows = [...table.querySelectorAll("tr.reg")].filter(r => r !== row);
+      const next = rows.find(r => { const b = r.getBoundingClientRect(); return ev.clientY < b.top + b.height / 2; });
+      if (next) { if (row.nextElementSibling !== next) next.before(row); }
+      else if (rows.length && rows[rows.length - 1].nextElementSibling !== row) rows[rows.length - 1].after(row);
+      // Keep the row in view when dragging near the window's edges
+      if (ev.clientY < 40) window.scrollBy(0, -12); else if (ev.clientY > window.innerHeight - 40) window.scrollBy(0, 12);
+    };
+    h.onpointerup = h.onpointercancel = () => {
+      h.onpointermove = h.onpointerup = h.onpointercancel = null;
+      row.classList.remove("dragging");
+      const order = [...table.querySelectorAll("tr.reg")].map(r => r.dataset.id);
+      if (order.join() !== before) save(order, hiddenNow());
+    };
   });
   $("apps").querySelectorAll("[data-show]").forEach(c => c.onchange = () => {
     const hidden = new Set(hiddenNow());
@@ -632,6 +795,210 @@ function refresh() {
   loadWords().catch(e => $("words").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadMusic().catch(e => $("musicinfo").innerHTML = `<span class="err">${esc(e.message)}</span>`);
   loadPodcasts().catch(e => $("podinfo").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+  loadFiles(sdPath).catch(e => $("sdlist").innerHTML = `<span class="err">${esc(e.message)}</span>`);
+}
+
+// ---------- SD card browser ----------
+let sdPath = "/", sdCancel = false;
+const SD_CHUNK = 64 * 1024;
+const joinPath = (dir, name) => (dir === "/" ? "" : dir) + "/" + name;
+const sizeText = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" :
+  n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
+const dateText = t => t ? new Date(t * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "";
+const fileUrl = (op, path, extra = "") => `/api/files${op}?p=${encodeURIComponent(path)}${extra}`;
+
+async function loadFiles(path) {
+  const r = await api(fileUrl("", path));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    $("sdlist").innerHTML = `<span class="err">${esc(j.error || "HTTP " + r.status)}</span>`;
+    if (r.status === 404 && path !== "/") return loadFiles("/");
+    return;
+  }
+  sdPath = j.path || "/";
+  $("sdspace").textContent = j.total ? `${sizeText(j.free)} free of ${sizeText(j.total)}` : "";
+  // Breadcrumbs: / > Music > Album
+  const parts = sdPath.split("/").filter(Boolean);
+  let crumbs = `<a href="#" data-go="/">card</a>`;
+  parts.forEach((p, i) => crumbs += ` / <a href="#" data-go="${esc("/" + parts.slice(0, i + 1).join("/"))}">${esc(p)}</a>`);
+  $("sdcrumbs").innerHTML = crumbs;
+  $("sdup").disabled = sdPath === "/";
+  const entries = (j.entries || []).sort((a, b) => (b.d - a.d) || a.n.localeCompare(b.n, undefined, { numeric: true, sensitivity: "base" }));
+  $("sdlist").innerHTML = entries.length ? `<table><tr><th></th><th>Name</th><th class="num">Size</th><th>Modified</th><th></th></tr>` +
+    entries.map(e => {
+      const p = esc(joinPath(sdPath, e.n));
+      return `<tr><td>${e.d ? "📁" : "📄"}</td>` +
+        `<td>${e.d ? `<a href="#" data-go="${p}">${esc(e.n)}</a>` : esc(e.n)}</td>` +
+        `<td class="num">${e.d ? "" : sizeText(e.s || 0)}</td><td class="muted">${dateText(e.t)}</td>` +
+        `<td class="num" style="white-space:nowrap">` +
+        (e.d ? "" : `<button class="small" data-dl="${p}">Download</button> `) +
+        `<button class="small" data-mv="${p}">Rename</button> ` +
+        `<button class="small danger" data-rm="${p}" data-dir="${e.d ? 1 : 0}">Delete</button></td></tr>`;
+    }).join("") + `</table>` + (j.truncated ? `<p class="muted">Only the first 2000 items are shown.</p>` : "")
+    : `<p class="muted">Empty folder. Drop files here to upload them.</p>`;
+  $("sdsection").querySelectorAll("[data-go]").forEach(a => a.onclick = ev => { ev.preventDefault(); loadFiles(a.dataset.go).catch(() => {}); });
+  $("sdlist").querySelectorAll("[data-dl]").forEach(b => b.onclick = () => {
+    const a = document.createElement("a");               // the token goes in the URL: a plain link can't send headers
+    a.href = fileUrl("/get", b.dataset.dl, "&t=" + encodeURIComponent(token));
+    a.download = b.dataset.dl.split("/").pop();
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+  $("sdlist").querySelectorAll("[data-mv]").forEach(b => b.onclick = async () => {
+    const old = b.dataset.mv, name = prompt("New name", old.split("/").pop());
+    if (!name || name.includes("/") || name === old.split("/").pop()) return;
+    const r = await api(fileUrl("/move", old, "&to=" + encodeURIComponent(joinPath(sdPath, name))), { method: "POST" });
+    if (!r.ok) alert("Couldn't rename it: " + ((await r.json().catch(() => ({}))).error || r.status));
+    loadFiles(sdPath).catch(() => {});
+  });
+  $("sdlist").querySelectorAll("[data-rm]").forEach(b => b.onclick = async () => {
+    const name = b.dataset.rm.split("/").pop();
+    if (!confirm(b.dataset.dir === "1" ? `Delete the folder "${name}" and everything in it?` : `Delete "${name}"?`)) return;
+    b.disabled = true;
+    const r = await api(fileUrl("", b.dataset.rm), { method: "DELETE" });
+    if (!r.ok) alert("Couldn't delete it: " + ((await r.json().catch(() => ({}))).error || r.status));
+    loadFiles(sdPath).catch(() => {});
+  });
+}
+
+// Uploads one file to `path` in chunks, resuming where the device is if it gets out of step.
+// onBytes(bytes of this file sent so far) is optional.
+async function putFile(file, path, onBytes = () => {}, cancelled = () => false) {
+  let offset = 0, failures = 0;
+  do {
+    if (cancelled()) throw new Error("cancelled");
+    const chunk = file.slice(offset, Math.min(offset + SD_CHUNK, file.size));
+    let r;
+    try {
+      r = await api(fileUrl("/put", path, `&offset=${offset}&total=${file.size}`), { method: "POST", body: chunk });
+    } catch (e) {
+      if (e.message === "not paired") throw e;
+      if (++failures > 5) throw new Error("the device stopped answering");
+      await new Promise(res => setTimeout(res, 1000 * failures));
+      continue;
+    }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409) { offset = j.have || 0; continue; }
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    failures = 0;
+    offset = j.have;
+    onBytes(offset);
+  } while (offset < file.size);
+}
+
+async function uploadOne(file, path, done, total) {
+  let offset = 0, failures = 0;
+  do {
+    if (sdCancel) throw new Error("cancelled");
+    const chunk = file.slice(offset, Math.min(offset + SD_CHUNK, file.size));
+    let r;
+    try {
+      r = await api(fileUrl("/put", path, `&offset=${offset}&total=${file.size}`), { method: "POST", body: chunk });
+    } catch (e) {
+      if (e.message === "not paired") throw e;
+      if (++failures > 5) throw new Error("the device stopped answering");
+      await new Promise(res => setTimeout(res, 1000 * failures));
+      continue;
+    }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409) { offset = j.have || 0; continue; }
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    failures = 0;
+    offset = j.have;
+    const sent = done + offset;
+    $("sdprogress").style.width = (100 * sent / Math.max(1, total)).toFixed(1) + "%";
+  } while (offset < file.size);
+}
+
+// items: [{file, rel}] where rel is the path below the current folder ("Album/01.mp3").
+// E-books (.epub .txt .html) going straight into the books folder are converted here, as by
+// "Add a book" (pictures, chapters from the table of contents, GBK text), instead of copied.
+async function uploadItems(items) {
+  if (!items.length) return;
+  const base = sdPath, total = items.reduce((s, it) => s + it.file.size, 0);
+  const info = await getJSON("/api/info").catch(() => ({}));
+  const booksDir = info.books_dir ? info.books_dir.replace(/\/+$/, "") || "/" : null;   // null: books are internal
+  const isBook = rel => booksDir !== null && BOOK_EXT.test(rel) &&
+    joinPath(base, rel).replace(/\/[^/]*$/, "").toLowerCase() === (booksDir === "/" ? "" : booksDir.toLowerCase());
+  sdCancel = false;
+  $("sdcancel").classList.remove("hidden");
+  const started = Date.now();
+  let done = 0, books = 0;
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const { file, rel } = items[i];
+      if (sdCancel) throw new Error("cancelled");
+      if (isBook(rel)) {
+        $("sdstatus").textContent = `${i + 1} / ${items.length}: converting ${rel}`;
+        const book = await convertBook(file);
+        await sendBook(book, (f, t) => {
+          $("sdprogress").style.width = (100 * (done + f * file.size) / Math.max(1, total)).toFixed(1) + "%";
+          $("sdstatus").textContent = `${i + 1} / ${items.length}: ${book.title} (${t})`;
+        });
+        books++;
+      } else {
+        $("sdstatus").textContent = `${i + 1} / ${items.length}: ${rel}`;
+        await uploadOne(file, joinPath(base, rel), done, total);
+      }
+      done += file.size;
+    }
+    const secs = (Date.now() - started) / 1000;
+    $("sdstatus").textContent = `Uploaded ${items.length} file${items.length > 1 ? "s" : ""}, ${sizeText(total)}` +
+      (secs > 1 ? ` (${sizeText(total / secs)}/s)` : "") +
+      (books ? ` · ${books} added as book${books > 1 ? "s" : ""} (converted, with pictures)` : "");
+    if (books) loadBooks().catch(() => {});
+  } catch (e) {
+    $("sdstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("sdcancel").classList.add("hidden");
+    loadFiles(sdPath).catch(() => {});
+  }
+}
+
+// Files and folders dropped from the computer: folders are walked so their layout is kept
+async function droppedItems(dt) {
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), rel: prefix + entry.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {                                         // readEntries returns a batch at a time
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e, prefix + entry.name + "/");
+      }
+    }
+  };
+  const entries = [...dt.items].map(it => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  if (entries.length) for (const e of entries) await walk(e, "");
+  else for (const f of dt.files) out.push({ file: f, rel: f.name });
+  return out;
+}
+
+$("sdup").onclick = () => loadFiles(sdPath.replace(/\/[^/]+$/, "") || "/").catch(() => {});
+$("sdmkdir").onclick = async () => {
+  const name = prompt("New folder name");
+  if (!name || name.includes("/")) return;
+  const r = await api(fileUrl("/mkdir", joinPath(sdPath, name)), { method: "POST" });
+  if (!r.ok) alert("Couldn't make the folder: " + ((await r.json().catch(() => ({}))).error || r.status));
+  loadFiles(sdPath).catch(() => {});
+};
+$("sdpick").onclick = () => $("sdfiles").click();
+$("sdpickdir").onclick = () => $("sddir").click();
+$("sdfiles").onchange = () => { uploadItems([...$("sdfiles").files].map(f => ({ file: f, rel: f.name }))); $("sdfiles").value = ""; };
+$("sddir").onchange = () => { uploadItems([...$("sddir").files].map(f => ({ file: f, rel: f.webkitRelativePath || f.name }))); $("sddir").value = ""; };
+$("sdcancel").onclick = () => { sdCancel = true; };
+{
+  const box = $("sdsection");
+  box.addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); box.style.outline = "2px dashed var(--accent)"; } });
+  box.addEventListener("dragleave", e => { if (!box.contains(e.relatedTarget)) box.style.outline = ""; });
+  box.addEventListener("drop", async e => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    e.stopPropagation();                               // not the page-wide drop as well
+    box.style.outline = "";
+    uploadItems(await droppedItems(e.dataTransfer));
+  });
 }
 
 // ---------- podcasts ----------
@@ -946,13 +1313,15 @@ const SWAP = { "\u30FB":"\u00B7", "\u2032":"'", "\u2033":"\"", "\u2212":"-", "\u
                "\u2028":"\n", "\u2029":"\n" };
 const fits = cp => RANGES.some(([a, b]) => cp >= a && cp <= b);
 const MARK = "\x1E";   // starts a chapter-title line (the device starts a new page there)
+const PIC = "\x1D";    // PIC + number on a line of its own: picture <id>.Inn (a page of its own)
+const PIC_MAX = 100, PIC_W = 288, PIC_H = 108;   // pictures per book; the reader's picture area
 
 function cleanText(text) {
   let dropped = 0, out = "";
   text = text.normalize("NFC").replace(/\r\n?/g, "\n").replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "");
   for (const ch of text) {
     const c = SWAP[ch] ?? ch;
-    if (c === "\n" || c === MARK || fits(c.codePointAt(0))) out += c; else dropped++;
+    if (c === "\n" || c === MARK || c === PIC || fits(c.codePointAt(0))) out += c; else dropped++;
   }
   const lines = out.split("\n").map(l => l.replace(/ {2,}/g, " ").replace(/^ +| +$/g, "").replace(/^\x1E +/, MARK))
     .filter(l => l.length && l !== MARK);
@@ -978,13 +1347,21 @@ function decodeText(buf) {
 // Text of an HTML/XHTML document, one line per block element. Chapter markers go before
 // elements whose id is in `anchors` (id -> title) and, with `headings`, before every h1/h2.
 const BLOCKS = new Set(["P","DIV","H1","H2","H3","H4","H5","H6","LI","BLOCKQUOTE","SECTION","ARTICLE","TR","PRE","DD","DT","HEADER","FOOTER","ASIDE","FIGCAPTION"]);
-function htmlText(doc, anchors = new Map(), headings = false) {
+// `picture(src)` (optional) turns an <img> / SVG <image> into a picture number, or -1 to skip it.
+function htmlText(doc, anchors = new Map(), headings = false, picture = null) {
   let out = "";
   (function walk(n) {
     if (n.nodeType === 3) { out += n.nodeValue.replace(/\s+/g, " "); return; }
     if (n.nodeType !== 1) return;
     const tag = n.tagName.toUpperCase();
     if (tag === "SCRIPT" || tag === "STYLE" || tag === "HEAD") return;
+    if (picture && (tag === "IMG" || tag === "IMAGE")) {
+      const src = n.getAttribute("src") || n.getAttribute("xlink:href") ||
+                  n.getAttributeNS("http://www.w3.org/1999/xlink", "href") || n.getAttribute("href");
+      const num = src ? picture(src) : -1;
+      if (num >= 0) out += "\n" + PIC + num + "\n";
+      return;
+    }
     const id = n.getAttribute("id");
     if (id && anchors.has(id)) out += "\n" + MARK + anchors.get(id) + "\n";
     else if (headings && (tag === "H1" || tag === "H2") && n.textContent.trim())
@@ -1096,7 +1473,26 @@ async function epubToText(buf) {
   for (const it of opf.getElementsByTagName("item")) items[it.getAttribute("id")] = it.getAttribute("href");
   const titleEl = opf.getElementsByTagNameNS("*", "title")[0];
   const toc = await epubToc(read, opf, dir, dec);
-  let text = "";
+
+  // Pictures: zip paths in order of first appearance; number n -> paths[n]. The cover is
+  // number 0, shown first (and not again where a cover page shows it).
+  const paths = [], numbers = new Map();
+  const coverItem = [...opf.getElementsByTagName("item")].find(i => (i.getAttribute("properties") || "").split(/\s+/).includes("cover-image"));
+  const coverMeta = [...opf.getElementsByTagName("meta")].find(m => m.getAttribute("name") === "cover");
+  const coverHref = coverItem ? coverItem.getAttribute("href") : coverMeta ? items[coverMeta.getAttribute("content")] : null;
+  const coverPath = coverHref ? resolve(dir, coverHref) : null;
+  if (coverPath) { paths.push(coverPath); numbers.set(coverPath, 0); }
+  const numberFor = base => src => {
+    const p = resolve(base, src);
+    if (p === coverPath) return -1;                    // already shown first
+    if (numbers.has(p)) return numbers.get(p);
+    if (paths.length >= PIC_MAX) return -1;
+    numbers.set(p, paths.length);
+    paths.push(p);
+    return paths.length - 1;
+  };
+
+  let text = coverPath ? PIC + "0\n" : "";
   for (const ref of opf.getElementsByTagName("itemref")) {
     const href = items[ref.getAttribute("idref")];
     if (!href) continue;
@@ -1108,41 +1504,165 @@ async function epubToText(buf) {
     const anchors = new Map(here.filter(e => e.frag).map(e => [e.frag, e.title]));
     const start = here.find(e => !e.frag);
     if (start) text += MARK + start.title + "\n";
-    text += htmlText(parseMarkup(dec.decode(bytes)), anchors, toc.length === 0) + "\n";
+    const base = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    text += htmlText(parseMarkup(dec.decode(bytes)), anchors, toc.length === 0, numberFor(base)) + "\n";
   }
-  return { title: titleEl ? titleEl.textContent.trim() : "", text };
+
+  // Turn each picture into a small greyscale JPEG; drop markers of ones that can't be used
+  const pictures = [];
+  for (let n = 0; n < paths.length; n++) {
+    const bytes = await read(paths[n]).catch(() => null);
+    pictures[n] = bytes ? await pictureJpeg(bytes, PIC_W, PIC_H) : null;
+    if (!pictures[n]) text = text.split("\n").filter(l => l !== PIC + n).join("\n");
+  }
+  return { title: titleEl ? titleEl.textContent.trim() : "", text, pictures };
 }
 
-let pending = null;   // { bytes, title }
+// Whether a w x h picture shows bigger turned a quarter turn in a bw x bh box: when that at
+// least doubles its area (the device uses the same rule, image_should_rotate)
+function shouldRotate(w, h, bw, bh) {
+  const up = Math.min(1, bw / w, bh / h), turned = Math.min(1, bw / h, bh / w);
+  return turned * turned >= 1.5 * up * up;
+}
+
+// Draws image bytes scaled to fit w x h (or cropped to fill it, with `fill`) on white, in
+// greys. With `turn`, the picture is first turned a quarter turn counter-clockwise (its top to
+// the left, as the device turns tall pictures). Returns the canvas, or null if the browser
+// can't decode it or it's a tiny decoration.
+async function pictureCanvas(bytes, w, h, fill = false, turn = false) {
+  let bmp;
+  try { bmp = await createImageBitmap(new Blob([bytes])); } catch { return null; }
+  if (!fill && (bmp.width < 48 || bmp.height < 48)) return null;    // bullets, rules, spacers
+  if (turn) {
+    const t = document.createElement("canvas");
+    t.width = bmp.height; t.height = bmp.width;
+    const tg = t.getContext("2d");
+    tg.translate(0, bmp.width);
+    tg.rotate(-Math.PI / 2);
+    tg.drawImage(bmp, 0, 0);
+    bmp = t;
+  }
+  const s = fill ? Math.max(w / bmp.width, h / bmp.height) : Math.min(w / bmp.width, h / bmp.height);
+  const cw = fill ? w : Math.max(1, Math.round(bmp.width * s)), ch = fill ? h : Math.max(1, Math.round(bmp.height * s));
+  const c = document.createElement("canvas");
+  c.width = cw; c.height = ch;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff";
+  g.fillRect(0, 0, cw, ch);
+  g.filter = "grayscale(1)";
+  g.imageSmoothingQuality = "high";
+  g.drawImage(bmp, (cw - bmp.width * s) / 2, (ch - bmp.height * s) / 2, bmp.width * s, bmp.height * s);
+  return c;
+}
+
+// A baseline JPEG (what browsers write) the device can decode
+const canvasJpeg = c => new Promise(res => c.toBlob(b => res(b), "image/jpeg", 0.9));
+async function pictureJpeg(bytes, w, h) {
+  let bw = w, bh = h;
+  try {
+    const bmp = await createImageBitmap(new Blob([bytes]));
+    if (shouldRotate(bmp.width, bmp.height, w, h)) { bw = h; bh = w; }   // tall: fit the turned box
+    bmp.close && bmp.close();
+  } catch {}
+  const c = await pictureCanvas(bytes, bw, bh);
+  return c ? canvasJpeg(c) : null;
+}
+
+let pending = null;   // { title, text, pictures } from convertBook(), waiting for "Upload"
+
+const BOOK_EXT = /\.(epub|txt|html?)$/i;
+
+// A .txt / .epub / .html file -> { title, text, pictures, dropped }: the device's book format
+// (chapter marks, picture markers, only characters its font has), pictures as JPEG blobs
+async function convertBook(file) {
+  const buf = await file.arrayBuffer(), lower = file.name.toLowerCase();
+  let title = file.name.replace(/\.[^.]+$/, ""), raw, pictures = [];
+  if (lower.endsWith(".epub")) {
+    const e = await epubToText(buf);
+    raw = e.text;
+    pictures = e.pictures;
+    if (e.title) title = e.title;
+  } else if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+    raw = htmlText(parseMarkup(decodeText(buf)), new Map(), true);
+  } else {
+    raw = markTextChapters(decodeText(buf));
+  }
+  const { text, dropped } = cleanText(raw);
+  if (!text) throw new Error("no text found in " + file.name);
+  // Only pictures whose marker survived (each picture is sent once, by number)
+  return { title, text, dropped, pictures: pictures.map((p, n) => p && text.includes(PIC + n) ? p : null) };
+}
+
+// Sends a converted book to the device (text in chunks, then its pictures).
+// progress(fraction 0..1, text) is called along the way.
+async function sendBook(book, progress = () => {}) {
+  const title = book.title.replace(/[\r\n]+/g, " ").trim() || "Untitled";
+  const bytes = new TextEncoder().encode(title + "\n" + book.text);
+  const id = [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  let offset = 0, failures = 0;
+  while (offset < bytes.length) {
+    const chunk = bytes.subarray(offset, Math.min(offset + CHUNK, bytes.length));
+    let r;
+    try {
+      r = await api(`/api/upload?id=${id}&offset=${offset}&total=${bytes.length}`, { method: "POST", body: chunk });
+    } catch (e) {
+      if (e.message === "not paired") throw e;
+      if (++failures > 5) throw new Error("the device stopped answering");
+      await new Promise(res => setTimeout(res, 1000 * failures));
+      continue;                                   // retry the same chunk
+    }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409) { offset = j.have || 0; continue; }   // out of step: resume where the device is
+    if (r.status === 507) throw new Error("not enough space on the device");
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    failures = 0;
+    offset = j.have;
+    progress(offset / bytes.length, `${kb(offset)} / ${kb(bytes.length)}`);
+  }
+  // Then the pictures (the book must exist first: the device files them next to it)
+  const pics = (book.pictures || []).map((b, n) => [n, b]).filter(([, b]) => b);
+  for (let i = 0; i < pics.length; i++) {
+    const [n, blob] = pics[i];
+    progress(1, `Pictures ${i + 1} / ${pics.length}`);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const r = await api(`/api/books/picture?id=${id}&n=${n}`, { method: "POST", body: blob });
+        if (r.ok) break;
+        throw new Error((await r.json().catch(() => ({}))).error || "HTTP " + r.status);
+      } catch (e) {
+        if (e.message === "not paired" || attempt >= 3) throw new Error("picture " + n + ": " + e.message);
+        await new Promise(res => setTimeout(res, 1000 * attempt));
+      }
+    }
+  }
+  return title;
+}
 
 $("file").onchange = async () => {
-  const file = $("file").files[0];
+  const files = [...$("file").files];
+  if (files.length > 1) {
+    $("file").value = "";
+    return routeItems(files.map(f => ({ file: f, rel: f.name })), "books");
+  }
+  const file = files[0];
   if (!file) return;
   $("converted").classList.add("hidden");
   $("status").textContent = "";
   $("progress").style.width = "0";
   try {
-    const buf = await file.arrayBuffer(), lower = file.name.toLowerCase();
-    let title = file.name.replace(/\.[^.]+$/, ""), raw;
-    if (lower.endsWith(".epub")) {
-      const e = await epubToText(buf);
-      raw = e.text;
-      if (e.title) title = e.title;
-    } else if (lower.endsWith(".html") || lower.endsWith(".htm")) {
-      raw = htmlText(parseMarkup(decodeText(buf)), new Map(), true);
-    } else {
-      raw = markTextChapters(decodeText(buf));
-    }
-    const { text, dropped } = cleanText(raw);
-    if (!text) throw new Error("no text found in that file");
-    $("title").value = title;
-    pending = { text };
+    $("stats").textContent = "Converting…";
+    const book = await convertBook(file);
+    const { text, dropped } = book;
+    $("title").value = book.title;
+    pending = book;
     const sample = new TextEncoder().encode(text).length;
     const chapters = (text.match(/\x1E/g) || []).length;
+    const npics = book.pictures.filter(Boolean).length;
     $("stats").textContent = `${file.name}: ${kb(file.size)} → ${kb(sample)} of text, ${[...text].length.toLocaleString()} characters, ` +
       `${chapters ? chapters + " chapters" : "no chapters found"}` +
+      (npics ? `, ${npics} picture${npics > 1 ? "s" : ""}` : "") +
       (dropped ? `, ${dropped.toLocaleString()} unsupported characters removed` : "");
-    $("preview").textContent = text.slice(0, 600).replace(/\x1E/g, "\u00A7 ") + (text.length > 600 ? "…" : "");
+    $("preview").textContent = text.slice(0, 600).replace(/\x1E/g, "§ ").replace(/\x1D\d+/g, "[picture]") + (text.length > 600 ? "…" : "");
     $("converted").classList.remove("hidden");
   } catch (e) {
     $("stats").textContent = "";
@@ -1154,32 +1674,12 @@ $("file").onchange = async () => {
 
 $("upload").onclick = async () => {
   if (!pending) return;
-  const title = $("title").value.replace(/[\r\n]+/g, " ").trim() || "Untitled";
-  const bytes = new TextEncoder().encode(title + "\n" + pending.text);
-  const id = [...crypto.getRandomValues(new Uint8Array(4))].map(b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
   $("upload").disabled = true;
-  let offset = 0, failures = 0;
   try {
-    while (offset < bytes.length) {
-      const chunk = bytes.subarray(offset, Math.min(offset + CHUNK, bytes.length));
-      let r;
-      try {
-        r = await api(`/api/upload?id=${id}&offset=${offset}&total=${bytes.length}`, { method: "POST", body: chunk });
-      } catch (e) {
-        if (e.message === "not paired") throw e;
-        if (++failures > 5) throw new Error("the device stopped answering");
-        await new Promise(res => setTimeout(res, 1000 * failures));
-        continue;                                   // retry the same chunk
-      }
-      const j = await r.json().catch(() => ({}));
-      if (r.status === 409) { offset = j.have || 0; continue; }   // out of step: resume where the device is
-      if (r.status === 507) throw new Error("not enough space on the device");
-      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-      failures = 0;
-      offset = j.have;
-      $("progress").style.width = (100 * offset / bytes.length).toFixed(1) + "%";
-      $("status").textContent = `${kb(offset)} / ${kb(bytes.length)}`;
-    }
+    await sendBook({ ...pending, title: $("title").value }, (f, t) => {
+      $("progress").style.width = (100 * f).toFixed(1) + "%";
+      $("status").textContent = t;
+    });
     $("status").textContent = "Done";
     pending = null;
     $("file").value = "";
@@ -1191,6 +1691,366 @@ $("upload").onclick = async () => {
     $("upload").disabled = false;
   }
 };
+
+// ---------- off screen picture ----------
+
+let offJpeg = null;
+
+// The off screen photo: cropped to fill 296 x 128. A tall (portrait) photo is turned a quarter
+// turn first, when the board's Settings > Pictures allows it, so it fills the screen with far
+// less cut off.
+async function offscreenCanvas(bytes) {
+  const info = await getJSON("/api/info").catch(() => ({}));
+  let tall = false;
+  try {
+    const bmp = await createImageBitmap(new Blob([bytes]));
+    tall = bmp.height > bmp.width;
+    bmp.close && bmp.close();
+  } catch { return null; }
+  return pictureCanvas(bytes, 296, 128, true, tall && info.rotate_tall !== false);
+}
+
+// ---------- the off screen picture's cropper ----------
+// The photo (a canvas, so it can be turned) with a frame in the screen's shape (296:128) to
+// drag and size. Whatever is framed becomes the picture: previewed dithered, sent on "Send".
+const crop = { src: null, x: 0, y: 0, w: 0, scale: 1, view: 1 };
+const OFF_W = 296, OFF_H = 128;
+
+function cropFrameMax() {                          // the biggest frame that fits the photo
+  return Math.min(crop.src.width, crop.src.height * OFF_W / OFF_H);
+}
+
+function cropClamp() {
+  const h = crop.w * OFF_H / OFF_W;
+  crop.x = Math.max(0, Math.min(crop.src.width - crop.w, crop.x));
+  crop.y = Math.max(0, Math.min(crop.src.height - h, crop.y));
+}
+
+function cropDraw() {
+  const c = $("offcrop"), g = c.getContext("2d"), v = crop.view;
+  g.drawImage(crop.src, 0, 0, c.width, c.height);
+  const h = crop.w * OFF_H / OFF_W;
+  g.fillStyle = "rgba(0,0,0,.5)";                  // dim what's outside the frame
+  g.fillRect(0, 0, c.width, crop.y * v);
+  g.fillRect(0, (crop.y + h) * v, c.width, c.height - (crop.y + h) * v);
+  g.fillRect(0, crop.y * v, crop.x * v, h * v);
+  g.fillRect((crop.x + crop.w) * v, crop.y * v, c.width - (crop.x + crop.w) * v, h * v);
+  g.strokeStyle = "#fff"; g.lineWidth = 2;
+  g.strokeRect(crop.x * v, crop.y * v, crop.w * v, h * v);
+  // The framed part, as the device gets it: greys on white, 296 x 128
+  const out = document.createElement("canvas");
+  out.width = OFF_W; out.height = OFF_H;
+  const og = out.getContext("2d");
+  og.fillStyle = "#fff"; og.fillRect(0, 0, OFF_W, OFF_H);
+  og.filter = "grayscale(1)";
+  og.imageSmoothingQuality = "high";
+  og.drawImage(crop.src, crop.x, crop.y, crop.w, h, 0, 0, OFF_W, OFF_H);
+  ditherPreview(out, $("offpreview"));
+  clearTimeout(cropDraw.t);                         // the JPEG once the frame settles
+  cropDraw.t = setTimeout(async () => { offJpeg = await canvasJpeg(out); }, 150);
+}
+
+function cropLayout() {                             // display size of the photo, frame reset to the max
+  const c = $("offcrop");
+  crop.view = Math.min(1, 600 / crop.src.width, 420 / crop.src.height);
+  c.width = Math.round(crop.src.width * crop.view);
+  c.height = Math.round(crop.src.height * crop.view);
+  crop.w = cropFrameMax() * $("offzoom").value / 100;
+  crop.x = (crop.src.width - crop.w) / 2;
+  crop.y = (crop.src.height - crop.w * OFF_H / OFF_W) / 2;
+  cropClamp();
+  cropDraw();
+}
+
+function turnCanvas(src) {                          // a quarter turn counter-clockwise (as the device turns pictures)
+  const t = document.createElement("canvas");
+  t.width = src.height; t.height = src.width;
+  const g = t.getContext("2d");
+  g.translate(0, src.width);
+  g.rotate(-Math.PI / 2);
+  g.drawImage(src, 0, 0);
+  return t;
+}
+
+async function openCropper(bytes) {
+  let bmp;
+  try { bmp = await createImageBitmap(new Blob([bytes])); } catch { return false; }
+  let src = document.createElement("canvas");
+  src.width = bmp.width; src.height = bmp.height;
+  src.getContext("2d").drawImage(bmp, 0, 0);
+  const info = await getJSON("/api/info").catch(() => ({}));
+  if (src.height > src.width && info.rotate_tall !== false) src = turnCanvas(src);   // tall: start turned
+  crop.src = src;
+  $("offzoom").value = 100;
+  offJpeg = null;
+  $("offconverted").classList.remove("hidden");
+  cropLayout();
+  return true;
+}
+
+{
+  const c = $("offcrop");
+  let drag = null;
+  c.onpointerdown = e => {
+    if (!crop.src) return;
+    e.preventDefault();
+    c.setPointerCapture(e.pointerId);
+    drag = { px: e.clientX, py: e.clientY, x: crop.x, y: crop.y };
+  };
+  c.onpointermove = e => {
+    if (!drag) return;
+    const k = c.width / c.getBoundingClientRect().width / crop.view;   // screen px -> photo px
+    crop.x = drag.x + (e.clientX - drag.px) * k;
+    crop.y = drag.y + (e.clientY - drag.py) * k;
+    cropClamp();
+    cropDraw();
+  };
+  c.onpointerup = c.onpointercancel = () => { drag = null; };
+  const resize = pct => {                           // keep the frame's centre where it is
+    const h = crop.w * OFF_H / OFF_W, cx = crop.x + crop.w / 2, cy = crop.y + h / 2;
+    crop.w = cropFrameMax() * pct / 100;
+    crop.x = cx - crop.w / 2;
+    crop.y = cy - crop.w * OFF_H / OFF_W / 2;
+    cropClamp();
+    cropDraw();
+  };
+  $("offzoom").oninput = () => crop.src && resize(+$("offzoom").value);
+  c.addEventListener("wheel", e => {
+    if (!crop.src) return;
+    e.preventDefault();
+    const z = Math.max(15, Math.min(100, +$("offzoom").value + (e.deltaY > 0 ? 5 : -5)));
+    $("offzoom").value = z;
+    resize(z);
+  }, { passive: false });
+  $("offrotate").onclick = () => {
+    if (!crop.src) return;
+    crop.src = turnCanvas(crop.src);
+    cropLayout();
+  };
+}
+
+// Preview of what the panel will show: 4 greys with Floyd-Steinberg dithering, like the device
+function ditherPreview(src, dst) {
+  const w = src.width, h = src.height;
+  const img = src.getContext("2d").getImageData(0, 0, w, h), px = img.data;
+  const lum = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) lum[i] = px[i * 4];
+  let lo = 255, hi = 0;                             // stretch the contrast (the device does too)
+  const sorted = Float32Array.from(lum).sort();
+  lo = sorted[Math.floor(w * h * 0.01)]; hi = sorted[Math.floor(w * h * 0.99)];
+  if (hi - lo >= 32) for (let i = 0; i < w * h; i++) lum[i] = Math.min(255, Math.max(0, (lum[i] - lo) * 255 / (hi - lo)));
+  for (let i = 0; i < w * h; i++) lum[i] = 255 * Math.pow(lum[i] / 255, pictureGamma);   // the device's lightening
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, v = lum[i], q = Math.min(3, Math.max(0, Math.round(v * 3 / 255))), e = v - q * 85;
+    if (x + 1 < w) lum[i + 1] += e * 7 / 16;
+    if (y + 1 < h) {
+      if (x > 0) lum[i + w - 1] += e * 3 / 16;
+      lum[i + w] += e * 5 / 16;
+      if (x + 1 < w) lum[i + w + 1] += e / 16;
+    }
+    px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = q * 85;
+  }
+  dst.getContext("2d").putImageData(img, 0, 0);
+}
+
+$("offfile").onchange = async () => {
+  const file = $("offfile").files[0];
+  if (!file) return;
+  $("offstatus").textContent = "";
+  if (!await openCropper(new Uint8Array(await file.arrayBuffer()))) alert("The browser couldn't open that picture");
+};
+
+$("offupload").onclick = async () => {
+  if (!offJpeg && crop.src) offJpeg = await canvasJpeg((() => {    // the frame just moved: make it now
+    const out = document.createElement("canvas");
+    out.width = OFF_W; out.height = OFF_H;
+    const og = out.getContext("2d");
+    og.fillStyle = "#fff"; og.fillRect(0, 0, OFF_W, OFF_H);
+    og.filter = "grayscale(1)";
+    og.drawImage(crop.src, crop.x, crop.y, crop.w, crop.w * OFF_H / OFF_W, 0, 0, OFF_W, OFF_H);
+    return out;
+  })());
+  if (!offJpeg) return;
+  $("offupload").disabled = true;
+  try {
+    const r = await api("/api/offscreen", { method: "POST", body: offJpeg });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "HTTP " + r.status);
+    $("offstatus").textContent = "Sent: shown from the next time the device turns off";
+  } catch (e) {
+    $("offstatus").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("offupload").disabled = false;
+  }
+};
+
+$("offremove").onclick = async () => {
+  try {
+    const r = await api("/api/offscreen", { method: "DELETE" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    $("offconverted").classList.add("hidden");
+    alert("Removed: the power symbol is back from the next time the device turns off");
+  } catch (e) {
+    alert("Couldn't remove it: " + e.message);
+  }
+};
+
+// ---------- drop anything anywhere ----------
+// Files dropped on a section (or picked in "Add a book") are sorted by type: e-books are
+// converted and added as books, audio goes to the music folder (keeping the dropped folders,
+// and the pictures that came with them: album covers), app packages are installed, .opml files
+// add podcast feeds, a picture dropped on "Off screen picture" becomes that picture. Anything
+// else goes to the SD card browser's current folder. (The SD card section keeps its own rule:
+// everything goes where it's dropped.)
+const AUDIO_EXT = /\.(mp3|flac|m4a|mp4|aac|ogg|oga|opus|wav)$/i;
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp)$/i;
+let dropCancel = false;
+
+function dropUi(title) {
+  dropCancel = false;
+  $("droptitle").textContent = title;
+  $("dropprogress").style.width = "0";
+  $("dropdetail").textContent = "";
+  $("dropcancel").classList.remove("hidden");
+  $("dropclose").classList.add("hidden");
+  $("dropstatus").classList.remove("hidden");
+}
+$("dropcancel").onclick = () => { dropCancel = true; };
+$("dropclose").onclick = () => $("dropstatus").classList.add("hidden");
+
+async function routeItems(items, hint) {
+  if (!items.length) return;
+  const info = await getJSON("/api/info").catch(() => ({}));
+  const musicDir = (info.music_dir || "/Music").replace(/\/+$/, "") || "/";
+  // Folders that hold audio: everything in them is music (covers, .m3u, .cue ...)
+  const audioDirs = new Set(items.filter(it => AUDIO_EXT.test(it.rel)).map(it => it.rel.replace(/[^/]*$/, "")));
+  const appDirs = new Set(items.filter(it => /(^|\/)app\.json$/.test(it.rel)).map(it => it.rel.replace(/app\.json$/, "")));
+  const kind = it => {
+    const dir = it.rel.replace(/[^/]*$/, "");
+    if ([...appDirs].some(d => it.rel.startsWith(d))) return "appdir";
+    if (BOOK_EXT.test(it.rel)) return "book";
+    if (AUDIO_EXT.test(it.rel) || (dir && audioDirs.has(dir))) return "music";
+    if (/\.zip$/i.test(it.rel)) return "zip";
+    if (/\.opml$/i.test(it.rel) || (hint === "podcasts" && /\.xml$/i.test(it.rel))) return "opml";
+    if (IMAGE_EXT.test(it.rel) && hint === "offscreen") return "offscreen";
+    return "other";
+  };
+  const groups = {};
+  for (const it of items) (groups[kind(it)] ||= []).push(it);
+
+  dropUi(`Adding ${items.length} file${items.length > 1 ? "s" : ""}`);
+  const total = items.reduce((n, it) => n + it.file.size, 0) || 1;
+  let done = 0;
+  const log = [], step = (bytes, text) => {
+    $("dropprogress").style.width = (100 * Math.min(1, (done + bytes) / total)).toFixed(1) + "%";
+    if (text) $("dropdetail").textContent = [...log, text].join("\n");
+  };
+  const counts = {};
+  const ok = k => counts[k] = (counts[k] || 0) + 1;
+  try {
+    for (const it of groups.book || []) {
+      if (dropCancel) throw new Error("cancelled");
+      step(0, `Converting ${it.rel}…`);
+      const book = await convertBook(it.file);
+      await sendBook(book, (f, t) => step(f * it.file.size, `${book.title}: ${t}`));
+      done += it.file.size; ok("book");
+    }
+    for (const it of groups.music || []) {
+      if (dropCancel) throw new Error("cancelled");
+      await putFile(it.file, joinPath(musicDir, it.rel), b => step(b, `Music: ${it.rel}`), () => dropCancel);
+      done += it.file.size; ok("music");
+    }
+    if (groups.appdir) {                               // a dropped app folder (holding app.json)
+      step(0, "Installing an app…");
+      await installFrom(groups.appdir.map(it => [it.rel, async () => new Uint8Array(await it.file.arrayBuffer())]),
+                        "appstatus", "appprogress");
+      groups.appdir.forEach(it => done += it.file.size); ok("app");
+    }
+    for (const it of groups.zip || []) {
+      if (dropCancel) throw new Error("cancelled");
+      step(0, `Installing ${it.rel}…`);
+      const read = await readZip(await it.file.arrayBuffer());
+      if (read.names.some(n => /(^|\/)app\.json$/.test(n))) {
+        await installFrom(read.names.filter(n => !n.endsWith("/")).map(n => [n, () => read(n)]), "appstatus", "appprogress");
+        ok("app");
+      } else {                                         // not an app: just a file for the card
+        await putFile(it.file, joinPath(sdPath, it.rel), b => step(b, `SD card: ${it.rel}`), () => dropCancel);
+        ok("other");
+      }
+      done += it.file.size;
+    }
+    for (const it of groups.opml || []) {
+      const doc = new DOMParser().parseFromString(await it.file.text(), "text/xml");
+      const urls = [...doc.querySelectorAll("outline[xmlUrl]")].map(o => o.getAttribute("xmlUrl")).filter(u => /^https?:/i.test(u));
+      let added = 0;
+      for (const u of urls) {
+        step(0, `Podcasts: adding feed ${added + 1} of ${urls.length}`);
+        try { await addFeed(u); added++; } catch {}
+      }
+      done += it.file.size; counts.feed = (counts.feed || 0) + added;
+    }
+    for (const it of (groups.offscreen || []).slice(0, 1)) {
+      step(0, "Off screen picture…");
+      if (!await openCropper(new Uint8Array(await it.file.arrayBuffer()))) throw new Error("the browser couldn't open " + it.rel);
+      $("offconverted").scrollIntoView({ behavior: "smooth", block: "center" });
+      done += it.file.size; ok("offscreen");                // sent with "Send" once it's framed
+    }
+    for (const it of groups.other || []) {
+      if (dropCancel) throw new Error("cancelled");
+      await putFile(it.file, joinPath(sdPath, it.rel), b => step(b, `SD card ${sdPath}: ${it.rel}`), () => dropCancel);
+      done += it.file.size; ok("other");
+    }
+    step(0);
+    const parts = [];
+    if (counts.book) parts.push(`${counts.book} book${counts.book > 1 ? "s" : ""} added`);
+    if (counts.music) parts.push(`${counts.music} file${counts.music > 1 ? "s" : ""} into ${musicDir} (Music rescans when opened)`);
+    if (counts.app) parts.push(`${counts.app} app${counts.app > 1 ? "s" : ""} installed`);
+    if (counts.feed) parts.push(`${counts.feed} podcast feed${counts.feed > 1 ? "s" : ""} added`);
+    if (counts.offscreen) parts.push("off screen picture: frame it, then press Send");
+    if (counts.other) parts.push(`${counts.other} file${counts.other > 1 ? "s" : ""} into ${sdPath} on the card`);
+    $("droptitle").textContent = "Done";
+    $("dropdetail").textContent = parts.join("\n") || "Nothing to do";
+  } catch (e) {
+    $("droptitle").textContent = "Stopped";
+    $("dropdetail").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("dropcancel").classList.add("hidden");
+    $("dropclose").classList.remove("hidden");
+    refresh();
+  }
+}
+
+// Every section of the page is a drop target (the SD card section has its own, literal one)
+{
+  const hintFor = sec => {
+    const h = (sec.querySelector("h2") || {}).textContent || "";
+    return /off screen/i.test(h) ? "offscreen" : /podcast/i.test(h) ? "podcasts" : /book/i.test(h) ? "books" :
+           /music/i.test(h) ? "music" : /app/i.test(h) ? "apps" : "";
+  };
+  document.querySelectorAll("#app section").forEach(sec => {
+    if (sec.id === "sdsection") return;
+    sec.addEventListener("dragover", e => {
+      if (![...e.dataTransfer.types].includes("Files")) return;
+      e.preventDefault();
+      sec.classList.add("dropping");
+    });
+    sec.addEventListener("dragleave", e => { if (!sec.contains(e.relatedTarget)) sec.classList.remove("dropping"); });
+    sec.addEventListener("drop", async e => {
+      if (![...e.dataTransfer.types].includes("Files")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      sec.classList.remove("dropping");
+      routeItems(await droppedItems(e.dataTransfer), hintFor(sec));
+    });
+  });
+  // A drop that misses every section: don't let the browser navigate away to the file
+  window.addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+  window.addEventListener("drop", async e => {
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    if (!token) return;
+    routeItems(await droppedItems(e.dataTransfer), "");
+  });
+}
 
 if (token) refresh(); else showPair();
 </script>

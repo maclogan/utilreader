@@ -2,6 +2,7 @@
 #include "podcasts_internal.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,6 @@
 
 static const char *TAG = "podcasts";
 
-#define FEEDS_FILE      PODCASTS_ROOT "/feeds.tsv"
 #define FEEDS_MAGIC     "PODFEEDS 1"
 #define EPS_MAGIC       "PODEP 1"
 #define LINE_MAX_       1400
@@ -77,8 +77,27 @@ static bool ready(void)
     if (!sdcard_mount()) {
         return false;
     }
-    mkdir(PODCASTS_ROOT, 0777);
+    mkdir(podcasts_root(), 0777);
     return true;
+}
+
+// ---------- where they live ----------
+
+static char root[160];                  // "/sdcard/Podcasts"; "" until first asked
+
+const char *podcasts_root(void)
+{
+    if (!root[0]) {
+        char dir[128];
+        settings_get_str(SETTING_PODCASTS_DIR, dir, sizeof(dir), SETTING_PODCASTS_DIR_DEFAULT);
+        snprintf(root, sizeof(root), "%s%s", SDCARD_ROOT, strcmp(dir, "/") ? dir : "");
+    }
+    return root;
+}
+
+static void feeds_file(char *out, size_t size, const char *suffix)
+{
+    snprintf(out, size, "%s/feeds.tsv%s", podcasts_root(), suffix);
 }
 
 // ---------- defaults ----------
@@ -142,7 +161,9 @@ void pod_episode_id(const char *guid, char out[17])
 
 static int load_feeds(pod_feed_t *out, int max)
 {
-    FILE *f = fopen(FEEDS_FILE, "r");
+    char feeds[192];
+    feeds_file(feeds, sizeof(feeds), "");
+    FILE *f = fopen(feeds, "r");
     if (f == NULL) {
         return 0;
     }
@@ -173,8 +194,12 @@ static int load_feeds(pod_feed_t *out, int max)
 
 static bool save_feeds(const pod_feed_t *feeds, int n)
 {
-    FILE *f = fopen(FEEDS_FILE ".tmp", "w");
+    char path[192], tmp[200];
+    feeds_file(path, sizeof(path), "");
+    feeds_file(tmp, sizeof(tmp), ".tmp");
+    FILE *f = fopen(tmp, "w");
     if (f == NULL) {
+        ESP_LOGW(TAG, "can't write %s: %s", tmp, strerror(errno));
         return false;
     }
     fprintf(f, "%s\n", FEEDS_MAGIC);
@@ -187,8 +212,12 @@ static bool save_feeds(const pod_feed_t *feeds, int n)
     if (fclose(f) != 0) {
         return false;
     }
-    remove(FEEDS_FILE);
-    return rename(FEEDS_FILE ".tmp", FEEDS_FILE) == 0;
+    remove(path);
+    if (rename(tmp, path) != 0) {
+        ESP_LOGW(TAG, "can't rename %s: %s", tmp, strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 static int cmp_feed(const void *a, const void *b)
@@ -223,13 +252,31 @@ bool podcasts_feed(const char *id, pod_feed_t *out)
     return found;
 }
 
-bool podcasts_add_feed(const char *url, char *id_out)
+const char *podcasts_add_error(pod_add_result_t r)
 {
+    switch (r) {
+    case POD_ADD_OK: return "";
+    case POD_ADD_BAD_URL: return "That isn't an http:// or https:// address";
+    case POD_ADD_DUPLICATE: return "That feed is already added";
+    case POD_ADD_FULL: return "Too many feeds (50 at most): remove one first";
+    case POD_ADD_NO_CARD: return "The microSD card can't be read (is it in? formatted FAT32?)";
+    case POD_ADD_WRITE_FAILED: return "Couldn't save the feed list on the card (full? see the device log)";
+    default: return "Out of memory on the device";
+    }
+}
+
+pod_add_result_t podcasts_add_feed(const char *url, char *id_out)
+{
+    while (*url == ' ' || *url == '\t') {
+        url++;                                              // pasted with a leading space
+    }
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) {
-        return false;
+        ESP_LOGW(TAG, "add feed: not an http(s) address: %.60s", url);
+        return POD_ADD_BAD_URL;
     }
     lock();
     pod_feed_t *all = pod_alloc((PODCASTS_MAX_FEEDS + 1) * sizeof(pod_feed_t));
+    pod_add_result_t result = all ? POD_ADD_NO_CARD : POD_ADD_NO_MEMORY;
     bool ok = false;
     if (all && ready()) {
         int n = load_feeds(all, PODCASTS_MAX_FEEDS);
@@ -239,6 +286,7 @@ bool podcasts_add_feed(const char *url, char *id_out)
         for (int i = 0; i < n; i++) {
             dup |= !strcmp(all[i].id, id);
         }
+        result = dup ? POD_ADD_DUPLICATE : n >= PODCASTS_MAX_FEEDS ? POD_ADD_FULL : POD_ADD_WRITE_FAILED;
         if (!dup && n < PODCASTS_MAX_FEEDS) {
             pod_feed_t *d = &all[n++];
             memset(d, 0, sizeof(*d));
@@ -246,9 +294,12 @@ bool podcasts_add_feed(const char *url, char *id_out)
             clean_copy(d->url, sizeof(d->url), url);
             d->opt = (pod_options_t){-1, -1, -1, -1, -1};
             ok = save_feeds(all, n);
-            char dir[64];
-            snprintf(dir, sizeof(dir), "%s/%s", PODCASTS_ROOT, id);
-            mkdir(dir, 0777);
+            if (ok) {
+                result = POD_ADD_OK;
+                char dir[192];
+                snprintf(dir, sizeof(dir), "%s/%s", podcasts_root(), id);
+                mkdir(dir, 0777);
+            }
         }
         if (id_out) {
             snprintf(id_out, 9, "%s", id);
@@ -256,7 +307,8 @@ bool podcasts_add_feed(const char *url, char *id_out)
     }
     free(all);
     unlock();
-    return ok;
+    ESP_LOGI(TAG, "add feed %.80s: %s", url, result == POD_ADD_OK ? "added" : podcasts_add_error(result));
+    return result;
 }
 
 bool podcasts_update_feed(const pod_feed_t *feed)
@@ -289,8 +341,8 @@ bool podcasts_remove_feed(const char *id)
         memmove(&all[i], &all[i + 1], (n - i - 1) * sizeof(pod_feed_t));
         ok = save_feeds(all, n - 1);
         // Its folder: every file, then the folder
-        char dir[64], path[128];
-        snprintf(dir, sizeof(dir), "%s/%s", PODCASTS_ROOT, id);
+        char dir[192], path[256];
+        snprintf(dir, sizeof(dir), "%s/%s", podcasts_root(), id);
         DIR *d = opendir(dir);
         struct dirent *e;
         while (d && (e = readdir(d)) != NULL) {
@@ -312,7 +364,7 @@ bool podcasts_remove_feed(const char *id)
 
 static void eps_path(const char *feed_id, char *out, size_t size)
 {
-    snprintf(out, size, "%s/%s/episodes.tsv", PODCASTS_ROOT, feed_id);
+    snprintf(out, size, "%s/%s/episodes.tsv", podcasts_root(), feed_id);
 }
 
 static int cmp_ep_date(const void *a, const void *b)
@@ -323,7 +375,7 @@ static int cmp_ep_date(const void *a, const void *b)
 
 static int load_eps(const char *feed_id, pod_episode_t *out, int max)
 {
-    char path[64];
+    char path[224];
     eps_path(feed_id, path, sizeof(path));
     FILE *f = fopen(path, "r");
     if (f == NULL) {
@@ -357,8 +409,8 @@ static int load_eps(const char *feed_id, pod_episode_t *out, int max)
 
 static bool save_eps(const char *feed_id, const pod_episode_t *eps, int n)
 {
-    char path[64], tmp[72], dir[48];
-    snprintf(dir, sizeof(dir), "%s/%s", PODCASTS_ROOT, feed_id);
+    char path[224], tmp[232], dir[192];
+    snprintf(dir, sizeof(dir), "%s/%s", podcasts_root(), feed_id);
     mkdir(dir, 0777);
     eps_path(feed_id, path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
@@ -513,7 +565,7 @@ void pod_unlock(void) { unlock(); }
 
 void podcasts_episode_path(const char *feed_id, const pod_episode_t *ep, bool part, char *out, size_t size)
 {
-    snprintf(out, size, "%s/%s/%s.%s%s", PODCASTS_ROOT, feed_id, ep->id, ep->ext[0] ? ep->ext : "mp3",
+    snprintf(out, size, "%s/%s/%s.%s%s", podcasts_root(), feed_id, ep->id, ep->ext[0] ? ep->ext : "mp3",
              part ? ".part" : "");
 }
 
@@ -553,7 +605,7 @@ int podcasts_apply_rules(const char *feed_id)
         bool keep = pod_should_keep(&o, i, e);
         bool playing = !strcmp(playing_feed, feed_id) && !strcmp(playing_ep, e->id);
         if (!keep && (e->flags & POD_DOWNLOADED) && !playing) {
-            char path[128];
+            char path[256];
             podcasts_episode_path(feed_id, e, false, path, sizeof(path));
             remove(path);
             podcasts_episode_path(feed_id, e, true, path, sizeof(path));
@@ -572,4 +624,65 @@ int podcasts_apply_rules(const char *feed_id)
     free(eps);
     unlock();
     return missing;
+}
+
+// ---------- moving the folder ----------
+
+// What belongs to the podcasts: the feed list and the feeds' folders (8 hex digits). Only
+// these move, so choosing the card's top level (or leaving it) never drags other files along.
+static bool is_podcast_entry(const char *name)
+{
+    if (!strcasecmp(name, "feeds.tsv")) {
+        return true;
+    }
+    if (strlen(name) != 8) {
+        return false;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (!strchr("0123456789abcdefABCDEF", name[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool podcasts_set_root(const char *card_dir)
+{
+    if (!sdcard_mount()) {
+        return false;
+    }
+    lock();
+    char old[160], dest[160];
+    snprintf(old, sizeof(old), "%s", podcasts_root());
+    snprintf(dest, sizeof(dest), "%s%s", SDCARD_ROOT, strcmp(card_dir, "/") ? card_dir : "");
+    bool ok = true;
+    if (strcasecmp(old, dest) != 0) {
+        mkdir(dest, 0777);
+        DIR *d = opendir(old);
+        struct dirent *e;
+        char from[420], to[420];
+        while (d && (e = readdir(d)) != NULL) {
+            if (!is_podcast_entry(e->d_name)) {
+                continue;
+            }
+            snprintf(from, sizeof(from), "%s/%s", old, e->d_name);
+            snprintf(to, sizeof(to), "%s/%s", dest, e->d_name);
+            struct stat sb;
+            if (stat(to, &sb) == 0 || rename(from, to) != 0) {
+                ESP_LOGW(TAG, "couldn't move %s to %s", from, dest);
+                ok = false;
+            }
+        }
+        if (d) {
+            closedir(d);
+        }
+        if (ok && strcmp(old, SDCARD_ROOT) != 0) {
+            rmdir(old);                                     // only goes if nothing else is in it
+        }
+        settings_set_str(SETTING_PODCASTS_DIR, card_dir);
+        snprintf(root, sizeof(root), "%s", dest);
+        ESP_LOGI(TAG, "podcasts folder: %s%s", dest, ok ? "" : " (some files stayed behind)");
+    }
+    unlock();
+    return ok;
 }

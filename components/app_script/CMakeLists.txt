@@ -2,7 +2,7 @@
 idf_component_register(SRCS "script_host.c" "script_api.c" "script_json.c" "script_net.c"
                        INCLUDE_DIRS "include"
                        REQUIRES json                   # app_script.h uses cJSON
-                       PRIV_REQUIRES app_core lua display battery buttons fatfs wear_levelling vfs
+                       PRIV_REQUIRES app_core lua display battery buttons fatfs wear_levelling vfs image
                                      esp_psram esp_timer esp_http_client mbedtls)
 
 # Bundled apps: installed on first start, updated when the firmware brings a newer version.

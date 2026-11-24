@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "player.h"
+#include "freertos/FreeRTOS.h"              // TickType_t
 
 #define MEDIA_UI_ROWS 6                 // rows on a screen
 
@@ -33,6 +34,12 @@ void media_ui_list(const char *title, int count, int sel, media_row_fn row, cons
 // Now Playing for the player's current item. `seek_hint` is shown in SEEK mode
 // ("< >  back 10 s / ahead 30 s"); `idle` is the line when nothing plays.
 void media_ui_playing(bool seek_mode, const char *seek_hint, const char *idle, bool full);
+
+// Now Playing's long title / artist / album lines scroll. An app showing Now Playing adds
+// media_ui_marquee_wait() to its next_wakeup, and in tick redraws Now Playing (partial) when
+// media_ui_marquee_step() returns true.
+TickType_t media_ui_marquee_wait(void);
+bool media_ui_marquee_step(void);
 
 // A message: title, a detail line, and a hint at the bottom
 void media_ui_message(const char *bar_title, const char *title, const char *detail, const char *hint);

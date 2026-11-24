@@ -13,6 +13,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef enum {
@@ -38,7 +39,22 @@ typedef struct {
     uint32_t audio_offset;              // first byte of audio data (frames / samples)
     uint32_t audio_end;                 // end of audio data (before an ID3v1 tag, WAV chunk end)
     uint32_t sample_rate;               // from the headers, 0 if not read
+    uint32_t art_offset, art_size;      // embedded cover picture, size 0 = none (see art_kind)
+    uint8_t art_kind;                   // media_art_kind_t
+    bool art_v22;                       // MEDIA_ART_ID3_UNSYNC: an ID3v2.2 "PIC" frame
 } media_info_t;
+
+typedef enum {
+    MEDIA_ART_NONE,
+    MEDIA_ART_FILE,                     // art_offset / art_size are the picture file's bytes
+                                        // (MP3/AAC ID3 APIC, FLAC PICTURE, M4A covr)
+    MEDIA_ART_ID3_UNSYNC,               // an "unsynchronised" ID3 picture frame (raw) at art_offset
+    MEDIA_ART_OGG,                      // a METADATA_BLOCK_PICTURE in the Ogg / Opus comments
+} media_art_kind_t;
+
+// The embedded cover's picture bytes (JPEG / PNG), whatever art_kind: *data is malloc'd
+// (free it). False if there's none or it can't be read.
+bool media_info_art_bytes(const char *path, const media_info_t *m, uint8_t **data, size_t *len);
 
 // The format from the file name's extension (.mp3 .flac .wav .m4a .mp4 .aac .ogg .opus)
 media_format_t media_format_from_name(const char *path);

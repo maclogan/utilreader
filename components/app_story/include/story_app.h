@@ -2,8 +2,10 @@
  * Story app: a short Chinese graded-reader story written by Claude each day, with word
  * lookup and a saved-words list. See components/app_story/README.md.
  *
- *   MENU    - Today's story / Saved words / New story / Level. LEFT/RIGHT choose, SELECT opens
- *             (on Level, SELECT cycles HSK 1-6 for the next story).
+ *   MENU    - Today's story / Saved words / Review cards / New story / Level. LEFT/RIGHT
+ *             choose, SELECT opens (on Level, SELECT cycles HSK 1-6 for the next story).
+ *   CARDS   - flashcard review of the saved words (components/app_flashcards): SELECT flips,
+ *             LEFT = again, RIGHT = got it. BACK returns to this menu.
  *   READER  - the story, up to 3 rows per page. Each page starts with no word selected;
  *             LEFT/RIGHT select and move between words, hold LEFT/RIGHT turns the page,
  *             SELECT saves / un-saves the selected word.

@@ -25,6 +25,7 @@ typedef struct rss_parser rss_parser_t;
 // `item` returns false to stop parsing (rss_feed() then returns false)
 typedef struct {
     void (*channel_title)(void *ctx, const char *title);
+    void (*channel_image)(void *ctx, const char *url);  // optional: <itunes:image href> of the show
     bool (*item)(void *ctx, const rss_item_t *item);
     void *ctx;
 } rss_callbacks_t;

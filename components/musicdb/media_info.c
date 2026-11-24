@@ -124,6 +124,46 @@ static void id3_text(char *out, size_t size, const uint8_t *d, size_t n)
     }
 }
 
+// An ID3v2 picture frame (APIC, or PIC in v2.2) at `pos`, `n` bytes: records where the image
+// itself starts. Prefers the front cover (picture type 3) when there are several.
+static void id3_picture(FILE *f, uint32_t pos, uint32_t n, bool v22, bool *front, media_info_t *m)
+{
+    uint8_t h[200];
+    uint32_t hn = n < sizeof(h) ? n : sizeof(h);
+    if ((m->art_size && *front) || hn < 4 || !read_at(f, pos, h, hn)) {
+        return;
+    }
+    int enc = h[0];
+    uint32_t i = 1;
+    if (v22) {
+        i += 3;                                                     // "JPG" / "PNG"
+    } else {
+        while (i < hn && h[i]) i++;                                 // MIME type, 0-terminated
+        i++;
+    }
+    if (i >= hn) {
+        return;
+    }
+    bool is_front = h[i++] == 3;
+    if (m->art_size && !is_front) {
+        return;                                                     // keep the one we have
+    }
+    if (enc == 1 || enc == 2) {                                     // UTF-16 description: 00 00
+        while (i + 1 < hn && (h[i] || h[i + 1])) i += 2;
+        i += 2;
+    } else {
+        while (i < hn && h[i]) i++;
+        i++;
+    }
+    if (i >= hn) {
+        return;                                                     // description too long: skip
+    }
+    m->art_offset = pos + i;
+    m->art_size = n - i;
+    m->art_kind = MEDIA_ART_FILE;
+    *front = is_front;
+}
+
 // Reads an ID3v2 tag at `pos` if there is one. Returns the tag's total size (0 = none).
 static uint32_t read_id3v2(FILE *f, uint32_t pos, media_info_t *m)
 {
@@ -146,6 +186,8 @@ static uint32_t read_id3v2(FILE *f, uint32_t pos, media_info_t *m)
     if (buf == NULL) {
         return total;
     }
+    bool tag_unsync = ver < 4 && (h[5] & 0x80);                     // whole tag unsynchronised
+    bool front = false;
     while (p + (ver == 2 ? 6 : 10) <= end) {
         uint8_t fh[10];
         int hl = ver == 2 ? 6 : 10;
@@ -167,6 +209,22 @@ static uint32_t read_id3v2(FILE *f, uint32_t pos, media_info_t *m)
         else if (!memcmp(fh, ver == 2 ? "TP1" : "TPE1", ver == 2 ? 3 : 4)) { dst = m->artist; dsize = sizeof(m->artist); }
         else if (!memcmp(fh, ver == 2 ? "TAL" : "TALB", ver == 2 ? 3 : 4)) { dst = m->album; dsize = sizeof(m->album); }
         bool plain = ver == 2 || (fh[9] & (ver == 4 ? 0x0E : 0xC0)) == 0;   // not compressed / encrypted
+        bool picture = !memcmp(fh, ver == 2 ? "PIC" : "APIC", ver == 2 ? 3 : 4);
+        bool frame_unsync = ver == 4 && (fh[9] & 0x02);
+        bool readable = ver == 2 || (fh[9] & (ver == 4 ? 0x0C : 0xC0)) == 0;   // not compressed / encrypted
+        if (picture && readable) {
+            uint32_t skip = ver == 4 && (fh[9] & 0x01) ? 4 : 0;    // v2.4 data length indicator
+            if (fs > skip && (tag_unsync || frame_unsync)) {
+                if (!m->art_size) {                         // decoded later (media_info_art_bytes)
+                    m->art_offset = p + hl + skip;
+                    m->art_size = fs - skip;
+                    m->art_kind = MEDIA_ART_ID3_UNSYNC;
+                    m->art_v22 = ver == 2;
+                }
+            } else if (fs > skip) {
+                id3_picture(f, p + hl + skip, fs - skip, ver == 2, &front, m);
+            }
+        }
         if (dst && plain) {
             size_t n = fs < MAX_TEXT_FRAME ? fs : MAX_TEXT_FRAME;
             if (read_at(f, p + hl, buf, n)) {
@@ -211,10 +269,14 @@ static void vorbis_comments(const uint8_t *d, size_t n, media_info_t *m)
     for (uint32_t i = 0; i < count && p + 4 <= n; i++) {
         uint32_t len = le32(d + p);
         p += 4;
+        const char *c = (const char *)d + p;
+        if (n - p >= 23 && !strncasecmp(c, "METADATA_BLOCK_PICTURE=", 23) && !m->art_size) {
+            m->art_kind = MEDIA_ART_OGG;                            // read by media_info_art_bytes()
+            m->art_size = len;
+        }
         if (len > n - p) {
             break;                                                  // cut off (cover art beyond our read)
         }
-        const char *c = (const char *)d + p;
         const char *eq = memchr(c, '=', len);
         if (eq) {
             size_t kl = eq - c;
@@ -311,6 +373,22 @@ static void parse_flac(FILE *f, media_info_t *m, uint32_t start)
                     m->duration_ms = (uint32_t)(total * 1000 / rate);
                 }
             }
+        } else if (type == 6 && len > 32 && (!m->art_size || m->art_kind == MEDIA_ART_OGG)) {   // PICTURE
+            // type, MIME length + MIME, description length + text, 16 bytes of size/depth,
+            // data length, data
+            uint8_t b[8];
+            uint32_t q = p + 4;
+            if (read_at(f, q, b, 8)) {
+                q += 8 + be32(b + 4);
+                if (q + 4 <= p + 4 + len && read_at(f, q, b, 4)) {
+                    q += 4 + be32(b) + 16;
+                    if (q + 4 <= p + 4 + len && read_at(f, q, b, 4) && q + 4 + be32(b) <= p + 4 + len) {
+                        m->art_offset = q + 4;
+                        m->art_size = be32(b);
+                        m->art_kind = MEDIA_ART_FILE;
+                    }
+                }
+            }
         } else if (type == 4) {                                     // VORBIS_COMMENT
             size_t n = len < MAX_COMMENTS ? len : MAX_COMMENTS;
             uint8_t *d = malloc(n);
@@ -325,6 +403,10 @@ static void parse_flac(FILE *f, media_info_t *m, uint32_t start)
         }
     }
     m->audio_offset = p;
+    if (m->art_kind == MEDIA_ART_OGG) {                             // a comment picture in a FLAC
+        m->art_kind = MEDIA_ART_NONE;                               // file: not read (Ogg only)
+        m->art_size = 0;
+    }
 }
 
 static void parse_wav(FILE *f, media_info_t *m)
@@ -422,6 +504,16 @@ static void m4a_atoms(FILE *f, uint32_t start, uint32_t end, int depth, media_in
             uint8_t d[24];                                          // data atom: 16 header bytes, then 0, n, total
             if (read_at(f, body, d, 20) && !memcmp(d + 4, "data", 4)) {
                 *(t[0] == 't' ? &m->track : &m->disc) = (uint16_t)((d[18] << 8) | d[19]);
+            }
+        } else if (!memcmp(t, "covr", 4) && depth >= 2 && !m->art_size) {
+            uint8_t d[16];                                          // data atom: size, "data", type, locale
+            if (read_at(f, body, d, 16) && !memcmp(d + 4, "data", 4)) {
+                uint32_t dl = be32(d);
+                if (dl > 16 && dl <= body_end - body) {
+                    m->art_offset = body + 16;
+                    m->art_size = dl - 16;
+                    m->art_kind = MEDIA_ART_FILE;
+                }
             }
         } else if (!memcmp(t, "aART", 4) && depth >= 2 && !m->album_artist[0]) {
             uint8_t d[16];
@@ -593,5 +685,213 @@ bool media_info_read(const char *path, media_info_t *m)
         break;
     }
     fclose(f);
+    return true;
+}
+
+// ---------- cover bytes for the harder cases ----------
+
+#define MAX_ART (16 * 1024 * 1024)      // biggest embedded picture read
+
+// Where the picture starts inside an APIC / PIC frame body (after encoding, MIME or format,
+// picture type and description); 0 if it can't be told
+static size_t apic_image_start(const uint8_t *h, size_t n, bool v22)
+{
+    if (n < 4) {
+        return 0;
+    }
+    int enc = h[0];
+    size_t i = 1;
+    if (v22) {
+        i += 3;
+    } else {
+        while (i < n && h[i]) i++;
+        i++;
+    }
+    i++;                                                    // picture type
+    if (enc == 1 || enc == 2) {
+        while (i + 1 < n && (h[i] || h[i + 1])) i += 2;
+        i += 2;
+    } else {
+        while (i < n && h[i]) i++;
+        i++;
+    }
+    return i < n ? i : 0;
+}
+
+static const int8_t *b64_table(void)
+{
+    static int8_t t[256];
+    static bool made;
+    if (!made) {
+        memset(t, -1, sizeof(t));
+        const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) {
+            t[(uint8_t)a[i]] = (int8_t)i;
+        }
+        made = true;
+    }
+    return t;
+}
+
+// Decodes base64 in place; returns the decoded length
+static size_t b64_decode(uint8_t *s, size_t n)
+{
+    const int8_t *t = b64_table();
+    size_t o = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        int v = t[s[i]];
+        if (v < 0) {
+            continue;                                       // '=', line breaks
+        }
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            s[o++] = (uint8_t)(acc >> bits);
+        }
+    }
+    return o;
+}
+
+// The Ogg stream's second packet (the comments), reassembled across pages
+static uint8_t *ogg_comment_packet(FILE *f, uint32_t file_size, size_t *len)
+{
+    size_t cap = 64 * 1024, n = 0;
+    uint8_t *pkt = malloc(cap);
+    int packet = 0;
+    uint32_t p = 0;
+    while (pkt && packet < 2 && p + 27 <= file_size) {
+        uint8_t h[27 + 255];
+        if (!read_at(f, p, h, 27) || memcmp(h, "OggS", 4) != 0 || !read_at(f, p + 27, h + 27, h[26])) {
+            break;
+        }
+        int segs = h[26];
+        uint32_t q = p + 27 + segs;
+        for (int sg = 0; sg < segs && packet < 2; sg++) {
+            int lace = h[27 + sg];
+            if (packet == 1) {
+                if (n + lace > cap) {
+                    if (cap >= MAX_ART) {
+                        free(pkt);
+                        return NULL;
+                    }
+                    cap *= 2;
+                    uint8_t *bigger = realloc(pkt, cap);
+                    if (bigger == NULL) {
+                        free(pkt);
+                        return NULL;
+                    }
+                    pkt = bigger;
+                }
+                if (lace && !read_at(f, q, pkt + n, lace)) {
+                    free(pkt);
+                    return NULL;
+                }
+                n += lace;
+            }
+            q += lace;
+            if (lace < 255) {
+                packet++;
+            }
+        }
+        p = q;
+    }
+    if (packet < 2) {
+        free(pkt);
+        return NULL;
+    }
+    *len = n;
+    return pkt;
+}
+
+bool media_info_art_bytes(const char *path, const media_info_t *m, uint8_t **data, size_t *len)
+{
+    *data = NULL;
+    *len = 0;
+    if (!m->art_size || m->art_kind == MEDIA_ART_NONE) {
+        return false;
+    }
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    uint8_t *buf = NULL;
+    size_t n = 0, start = 0;
+    if (m->art_kind == MEDIA_ART_FILE || m->art_kind == MEDIA_ART_ID3_UNSYNC) {
+        n = m->art_size <= MAX_ART ? m->art_size : 0;
+        buf = n ? malloc(n) : NULL;
+        if (buf && !read_at(f, m->art_offset, buf, n)) {
+            free(buf);
+            buf = NULL;
+        }
+        if (buf && m->art_kind == MEDIA_ART_ID3_UNSYNC) {
+            size_t o = 0;                                   // undo it: FF 00 -> FF
+            for (size_t i = 0; i < n; i++) {
+                buf[o++] = buf[i];
+                if (buf[i] == 0xFF && i + 1 < n && buf[i + 1] == 0x00) {
+                    i++;
+                }
+            }
+            n = o;
+            start = apic_image_start(buf, n, m->art_v22);
+            if (start == 0) {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    } else if (m->art_kind == MEDIA_ART_OGG) {
+        size_t pn;
+        uint8_t *pkt = ogg_comment_packet(f, m->file_size, &pn);
+        // Skip the packet's magic ("\x03vorbis" / "OpusTags"), the vendor string, then look
+        // through the comments for METADATA_BLOCK_PICTURE=<base64 FLAC picture block>
+        size_t q = pkt && pn > 8 && !memcmp(pkt, "OpusTags", 8) ? 8 : 7;
+        if (pkt && q + 4 <= pn) {
+            q += 4 + le32(pkt + q);
+            uint32_t count = q + 4 <= pn ? le32(pkt + q) : 0;
+            q += 4;
+            for (uint32_t i = 0; i < count && q + 4 <= pn; i++) {
+                uint32_t cl = le32(pkt + q);
+                q += 4;
+                if (cl > pn - q) {
+                    break;
+                }
+                if (cl > 23 && !strncasecmp((const char *)pkt + q, "METADATA_BLOCK_PICTURE=", 23)) {
+                    size_t bn = b64_decode(pkt + q + 23, cl - 23);
+                    const uint8_t *b = pkt + q + 23;
+                    // FLAC picture: type, MIME length + MIME, description length + text,
+                    // width, height, depth, colours, data length, data
+                    size_t r = 4;
+                    if (r + 4 <= bn) r += 4 + be32(b + r);
+                    if (r + 4 <= bn) r += 4 + be32(b + r);
+                    r += 16;
+                    if (r + 4 <= bn) {
+                        size_t dl = be32(b + r);
+                        if (r + 4 + dl <= bn) {
+                            buf = malloc(dl);
+                            if (buf) {
+                                memcpy(buf, b + r + 4, dl);
+                                n = dl;
+                            }
+                        }
+                    }
+                    break;
+                }
+                q += cl;
+            }
+        }
+        free(pkt);
+    }
+    fclose(f);
+    if (buf == NULL) {
+        return false;
+    }
+    if (start) {
+        memmove(buf, buf + start, n - start);
+        n -= start;
+    }
+    *data = buf;
+    *len = n;
     return true;
 }

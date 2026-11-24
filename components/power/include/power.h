@@ -18,6 +18,10 @@
 
 #define POWER_ON_HOLD_MS 1500           // how long BACK / HOME must be held to turn on
 
+// A picture for the "off" screen (296x128 baseline JPEG, uploaded on the web page), shown in
+// 4 greys with the status line on top. Without it: the power symbol.
+#define POWER_OFF_PICTURE "/store/offpic.jpg"
+
 // Call first thing in app_main. After a wake-up from "off" it returns only if the power-on
 // gesture was made (and shows "Starting..." right away); otherwise the chip goes back to
 // sleep and this never returns. Does nothing after a reset or first power-up.

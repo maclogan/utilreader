@@ -47,10 +47,35 @@ Album".
 | Now Playing, VOL | Volume | Previous / next track | Play / pause | Switch to SEEK | Back to the list |
 | Now Playing, SEEK | Back / ahead 10 s | Previous / next track | Play / pause | Switch to VOL | Back to the list |
 
-**Now Playing** shows a placeholder for the album art (art isn't decoded), the title, artist and
+**Now Playing** shows the album art in 4 greys (dithered, 68x68), the title, artist and
 album, "3 of 12", the format and sample rate, a progress bar with the elapsed time and the
 time left, and the VOL / SEEK badge with the volume bar. The time updates every 10 s; presses
 update it at once.
+
+**Album art** fills the left third of Now Playing (96 x 96, 4 greys, dithered); the title,
+artist, album, progress and volume are on the right. It comes from the file's own tag (MP3/AAC
+ID3 `APIC`, including "unsynchronised" tags; FLAC `PICTURE`; M4A `covr`; Ogg/Opus
+`METADATA_BLOCK_PICTURE`), otherwise from a picture in the song's folder: `cover`, `folder` or
+`front` (.jpg/.jpeg/.png) first, then `album`, Windows' hidden `AlbumArt_{...}_Large.jpg` /
+`AlbumArtSmall.jpg`, anything named like a cover, and as a last resort any other picture there
+(back covers and disc scans come last). Baseline JPEGs, progressive JPEGs (their first scan: a
+1/8-size picture, enlarged up to 2x) and PNGs (not interlaced) all work. A new cover redraws
+the screen with the grey refresh; the time updates and button presses stay quick partial
+refreshes and leave the cover alone. Decoding: `components/image`.
+
+## Headphones
+
+The TLV320 watches the headphone jack (its fourth contact, through the breakout's mic
+detect jumper: leave it uncut). This works in every app, for music, podcasts and voice notes:
+
+- **Unplugging pauses** playback; plugging back in leaves it paused.
+- **The inline button** (on most headsets with a microphone): one press = play / pause, two =
+  next track, three = previous.
+- **Inline volume buttons don't work:** telling them apart needs an analog input the TLV320
+  doesn't have (Android remotes signal by resistance; Apple's use their own protocol).
+
+`components/player/player.c` (`headset_task`) polls the chip every 50 ms; the chip side is
+`audio_headset_*()` / `tlv320_headset_*()`. Until the DAC answers, it looks every 10 s.
 
 ## Remembering
 

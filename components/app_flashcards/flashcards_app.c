@@ -1,5 +1,6 @@
 /*
- * Flashcards app logic: build today's session from the deck, show cards, record answers.
+ * Flashcards logic (part of the Story app): build today's session from the deck, show cards,
+ * record answers.
  *
  * A session is a queue of the cards due today, shuffled. "Got it" removes the card from
  * the queue; "again" moves it to the back, so it comes round once more before the end.
@@ -46,7 +47,7 @@ static void show_current(bool full)
 static void show_done(bool full)
 {
     if (card_count == 0) {
-        flashcards_ui_show_message("No cards yet", "Save words in the story app (press)", full);
+        flashcards_ui_show_message("No cards yet", "Press on a word in a story to save it", full);
     } else {
         // When is the next card due?
         int next = -1;
@@ -114,9 +115,9 @@ static void answer(bool correct)
     }
 }
 
-// ---------- app callbacks ----------
+// ---------- entry points (the Story app's "Review cards") ----------
 
-static void flashcards_open(const app_t *self)
+void flashcards_start(void)
 {
     today = deck_today();
     if (today < 0) {
@@ -132,7 +133,7 @@ static void flashcards_open(const app_t *self)
     }
 }
 
-static bool flashcards_button(const app_t *self, button_event_t event)
+bool flashcards_button(button_event_t event)
 {
     if (event == BUTTON_BACK) {
         return false;                                       // leave (progress is already saved)
@@ -154,16 +155,18 @@ static bool flashcards_button(const app_t *self, button_event_t event)
     return true;
 }
 
-// Menu icon (the drawing lives with the app's other screens)
-static void app_icon(const app_t *self, int cx, int cy)
+int flashcards_due_count(void)
 {
-    flashcards_ui_draw_app_icon(cx, cy);
+    int day = deck_today();
+    if (day < 0) {
+        return -1;
+    }
+    if (cards == NULL) {
+        cards = heap_caps_malloc(DECK_MAX * sizeof(card_t), MALLOC_CAP_SPIRAM);
+    }
+    int n = cards ? deck_load(cards, DECK_MAX, day) : 0, due = 0;
+    for (int i = 0; i < n; i++) {
+        due += deck_is_due(&cards[i], day);
+    }
+    return due;
 }
-
-const app_t flashcards_app = {
-    .id = "cards",
-    .name = "Cards",
-    .draw_icon = app_icon,
-    .open = flashcards_open,
-    .button = flashcards_button,
-};

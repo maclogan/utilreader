@@ -31,6 +31,12 @@ static const char *TAG = "tlv320";
 #define P0_DAC_VOL_CTRL 0x40            // [3] L mute, [2] R mute
 #define P0_DAC_LVOL     0x41            // signed, 0.5 dB steps, -127 (-63.5 dB) .. +48 (+24 dB)
 #define P0_DAC_RVOL     0x42
+#define P0_FLAGS_STICKY 0x2C            // [5] headset button pressed, [4] headset inserted / removed (cleared on read)
+#define P0_FLAGS_NOW    0x2E            // [5] button pressed now, [4] headset in now
+#define P0_HEADSET      0x43            // [7] detection on, [6:5] type (00 none, 01 no mic, 11 mic),
+                                        // [4:2] insert debounce, [1:0] button debounce
+// page 3
+#define P3_TIMER_CLOCK  0x10            // [7] 0 = internal oscillator for the delay timers (debounce)
 // page 1
 #define P1_HP_DRIVERS   0x1F            // [7:6] HPL/HPR power, [4:3] common mode, [2] write 1
 #define P1_HP_POP       0x21            // [6:3] driver power-on time, [2:1] ramp step time
@@ -39,6 +45,7 @@ static const char *TAG = "tlv320";
 #define P1_HPR_VOL      0x25
 #define P1_HPL_DRIVER   0x28            // [6:3] gain dB, [2] unmuted
 #define P1_HPR_DRIVER   0x29
+#define P1_MICBIAS      0x2E            // [1:0] 01 = 2 V (powered while a headset is in)
 
 #define HP_CM_1V65      (2 << 3)        // headphone common mode 1.65 V: centred on a 3.3 V supply
 #define HP_DRIVERS_OFF  (0x04 | HP_CM_1V65)
@@ -65,6 +72,11 @@ static bool set_page(int p)
     }
     page = p;
     return true;
+}
+
+static bool read_reg(int p, uint8_t reg, uint8_t *value)
+{
+    return set_page(p) && i2c_master_transmit_receive(dev, &reg, 1, value, 1, TIMEOUT_MS) == ESP_OK;
 }
 
 // Writes one register on a page; logs and returns false on an I2C error
@@ -166,12 +178,8 @@ static bool solve_logged(uint32_t rate, tlv320_clocks_t *c)
 
 // ---------- start / stop ----------
 
-bool tlv320_start(uint32_t rate)
+static bool add_device(void)
 {
-    tlv320_clocks_t c;
-    if (!solve_logged(rate, &c)) {
-        return false;
-    }
     if (dev == NULL) {
         i2c_master_bus_handle_t bus = i2c_bus_get();
         if (bus == NULL) {
@@ -186,6 +194,25 @@ bool tlv320_start(uint32_t rate)
             dev = NULL;
             return false;
         }
+    }
+    return true;
+}
+
+// Headset detection (datasheet 6.3.10.5): the debounce timers from the internal oscillator
+// (their default, MCLK, isn't connected here), mic bias 2 V for the jack's fourth contact
+// (MICDET), detection on with 128 ms insert and 16 ms button debounce. Lost at every reset.
+static bool headset_config(void)
+{
+    return w(3, P3_TIMER_CLOCK, 0x01) &&
+           w(1, P1_MICBIAS, 0x01) &&
+           w(0, P0_HEADSET, 0x80 | (3 << 2) | 2);
+}
+
+bool tlv320_start(uint32_t rate)
+{
+    tlv320_clocks_t c;
+    if (!solve_logged(rate, &c) || !add_device()) {
+        return false;
     }
 
     // Hardware reset through the expander (if there is one; the line idles high), then a
@@ -211,7 +238,8 @@ bool tlv320_start(uint32_t rate)
               w(1, P1_HPL_VOL, 0x80) && w(1, P1_HPR_VOL, 0x80) &&
               w(1, P1_HPL_DRIVER, 0x04) && w(1, P1_HPR_DRIVER, 0x04) &&
               w(1, P1_HP_DRIVERS, HP_DRIVERS_ON) &&
-              w(0, P0_DAC_PATH, 0xD4);                               // DACs on, L->L, R->R, soft step
+              w(0, P0_DAC_PATH, 0xD4) &&                             // DACs on, L->L, R->R, soft step
+              headset_config();                                      // the soft reset cleared it
     if (!ok) {
         return false;
     }
@@ -268,4 +296,40 @@ void tlv320_stop(void)
     w(0, P0_NDAC, 0x00);
     w(0, P0_MDAC, 0x00);
     w(0, P0_PLL_PR, 0x11);                                           // PLL off (P=1, R=1)
+}
+
+// ---------- headset detection ----------
+
+bool tlv320_headset_init(void)
+{
+    expander_set_output(EXPANDER_DAC_RESET, true);                  // out of reset (idle state)
+    vTaskDelay(pdMS_TO_TICKS(2));
+    // Is anything there? (A quiet probe: an ordinary transfer to a missing chip makes the I2C
+    // driver log three errors, and this is asked every 10 s until the DAC is wired.)
+    i2c_master_bus_handle_t bus = i2c_bus_get();
+    if (bus == NULL || i2c_master_probe(bus, ADDR, TIMEOUT_MS) != ESP_OK || !add_device()) {
+        return false;
+    }
+    page = -1;
+    uint8_t v;
+    if (!read_reg(0, P0_HEADSET, &v)) {
+        return false;                                               // no chip
+    }
+    if (v & 0x80) {
+        return true;                                                // already set up (playback did it)
+    }
+    return headset_config();
+}
+
+bool tlv320_headset_poll(bool *in, bool *pressed_now, bool *button_event, bool *plug_event)
+{
+    uint8_t sticky, now;
+    if (dev == NULL || !read_reg(0, P0_FLAGS_STICKY, &sticky) || !read_reg(0, P0_FLAGS_NOW, &now)) {
+        return false;
+    }
+    *in = now & 0x10;
+    *pressed_now = now & 0x20;
+    *button_event = sticky & 0x20;
+    *plug_event = sticky & 0x10;
+    return true;
 }

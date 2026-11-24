@@ -186,6 +186,8 @@ Colors: `screen.BLACK` (0, the default) and `screen.WHITE` (1).
 | `screen.text16(x, y, text, [color])` | UTF-8 in the 16 px Unicode font: Chinese, pinyin, accented Latin. Chinese characters are 16 px wide, Latin 8 px. Returns the x after the text |
 | `screen.text16_width(text)` | |
 | `screen.bitmap(x, y, w, h, data, [color])` | 1-bit image from a string: `ceil(w/8)` bytes per row, top to bottom, most significant bit leftmost, 1 = draw |
+| `screen.image(file, x, y, [max_w], [max_h], [mode])` | A baseline JPEG from the app's data folder (saved with `storage.write`) or its package, shrunk to fit `max_w` x `max_h` (default: the screen) and dithered. `mode` `"grey"` (default: 4 greys, shown by a **full** refresh; a partial one shows it in black and white) or `"bw"` (dithered to black and white: looks right with partial refreshes). Returns the drawn width and height, or `nil` and a reason (PNGs and progressive JPEGs aren't supported) |
+| `screen.image_data(jpeg, x, y, [max_w], [max_h], [mode])` | The same from a string, e.g. the body of a `net.get` |
 | `screen.width`, `screen.height` | 296, 128 |
 
 ### ui: the board's look

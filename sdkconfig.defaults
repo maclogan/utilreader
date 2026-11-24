@@ -33,5 +33,14 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # Bigger main task stack (comfortable headroom for drawing + JSON)
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
+
+# Mounted file systems at once (console, sockets, /store, /books, /apps, /sdcard...). ESP-IDF
+# counts the most ever registered, not how many are now, so unmounting and remounting the
+# card (formatting does) needs headroom above 8.
+CONFIG_VFS_MAX_COUNT=16
+
+# The web page's SD card browser sends file paths in the URL (URL-encoded: UTF-8 names
+# triple in length)
+CONFIG_HTTPD_MAX_URI_LEN=1024

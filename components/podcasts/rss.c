@@ -285,6 +285,12 @@ static void start_element(rss_parser_t *p, const char *name, const char *tag, bo
     } else if (!in_item && p->channel_depth >= 0 && depth == p->channel_depth + 1 && !prefix[0] &&
                !strcmp(local, "title") && !p->channel_title_done) {
         p->field = F_CHANNEL_TITLE;
+    } else if (!in_item && p->channel_depth >= 0 && depth == p->channel_depth + 1 &&
+               !strcmp(prefix, "itunes") && !strcmp(local, "image") && p->cb.channel_image) {
+        char url[400];
+        if (attr(tag, "href", url, sizeof(url)) && url[0]) {
+            p->cb.channel_image(p->cb.ctx, url);
+        }
     }
     p->text_len = 0;
     if (!empty) {

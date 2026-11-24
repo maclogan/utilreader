@@ -1,23 +1,32 @@
 #include "webui.h"
 
+#include <ctype.h>                      // isalnum(): download file names
+#include <dirent.h>                     // the SD card browser
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>                     // rmdir()
 #include <stdlib.h>                     // strtoul(), free()
 #include <string.h>
+#include <strings.h>                    // strncasecmp()
 #include "app_registry.h"               // menu order and hidden apps
 #include "app_script.h"                 // installing script apps
 #include "books.h"                      // book files
 #include "buttons.h"                    // buttons_post(BUTTON_WAKE): tell the main loop to redraw
 #include "cJSON.h"                      // JSON responses
+#include "epd.h"                        // epd_picture_gamma(): the off screen preview
 #include "esp_heap_caps.h"              // PSRAM buffers
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_random.h"                 // esp_random(): pairing codes and tokens
-#include "esp_timer.h"                  // esp_timer_get_time(): code expiry
+#include "esp_timer.h"
+#include "esp_vfs_fat.h"                // esp_vfs_fat_info(): card space                  // esp_timer_get_time(): code expiry
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "musicdb.h"                    // the music library
 #include "playlists.h"
+#include "player.h"                     // stopped before its file is deleted or moved
 #include "podcasts.h"                   // podcast feeds and episodes
+#include "power.h"                      // POWER_OFF_PICTURE
 #include "sdcard.h"
 #include <stdarg.h>
 #include "review.h"                     // saved words
@@ -147,7 +156,7 @@ static esp_err_t send_error(httpd_req_t *req, const char *status, const char *me
 // Value of ?key=... in the request URL, into out[size]. Returns false if missing.
 static bool query(httpd_req_t *req, const char *key, char *out, size_t size)
 {
-    char q[160];
+    char q[CONFIG_HTTPD_MAX_URI_LEN + 1];                   // long enough for the file browser's paths
     return httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK
         && httpd_query_key_value(q, key, out, size) == ESP_OK;
 }
@@ -189,6 +198,7 @@ static esp_err_t recv_body(httpd_req_t *req, char **out, int *len_out)
 static esp_err_t page_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");  // always this firmware's page (and converter)
     return httpd_resp_sendstr(req, index_html);
 }
 
@@ -206,6 +216,16 @@ static esp_err_t info_get(httpd_req_t *req)
     cJSON_AddNumberToObject(j, "total", (double)total);
     cJSON_AddNumberToObject(j, "free", (double)free_bytes);
     cJSON_AddNumberToObject(j, "app_api", APP_SCRIPT_API_VERSION);   // the catalog checks apps against it
+    char books_dir[128];
+    books_location(books_dir, sizeof(books_dir));
+    cJSON_AddStringToObject(j, "books_dir", books_dir);     // "" = internal; the SD browser converts books dropped there
+    char music_dir[128];
+    settings_get_str(SETTING_MUSIC_DIR, music_dir, sizeof(music_dir), SETTING_MUSIC_DIR_DEFAULT);
+    cJSON_AddStringToObject(j, "music_dir", music_dir);     // where dropped audio goes
+    cJSON_AddBoolToObject(j, "rotate_tall", settings_get_i32(SETTING_ROTATE_TALL, 1));   // the off screen photo
+    cJSON_AddNumberToObject(j, "picture_gamma", epd_picture_gamma() / 100.0);   // the off screen preview matches the device
+    cJSON_AddNumberToObject(j, "menu_rows", settings_get_i32(SETTING_MENU_ROWS, 2));      // home screen layout
+    cJSON_AddNumberToObject(j, "menu_cols", settings_get_i32(SETTING_MENU_COLS, 4));
     return send_json(req, j, NULL);
 }
 
@@ -313,6 +333,94 @@ static esp_err_t upload_post(httpd_req_t *req)
         cJSON_AddStringToObject(j, "error", esp_err_to_name(err));
         return send_json(req, j, "400 Bad Request");
     }
+}
+
+// A picture for a book that's already uploaded: ?id=1A2B3C4D&n=7, body = baseline JPEG
+static esp_err_t book_picture_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char id[16], num[8];
+    if (!query(req, "id", id, sizeof(id)) || !books_valid_id(id) || !query(req, "n", num, sizeof(num))) {
+        return send_error(req, "400 Bad Request", "missing or bad id / n");
+    }
+    int n = atoi(num);
+    if (n < 0 || n >= BOOK_PICTURES_MAX) {
+        return send_error(req, "400 Bad Request", "picture number out of range");
+    }
+    char *buf;
+    int len;
+    esp_err_t got = recv_body(req, &buf, &len);
+    if (got != ESP_OK) {
+        return got == ESP_FAIL ? ESP_FAIL : ESP_OK;
+    }
+    char ext[8];
+    snprintf(ext, sizeof(ext), "I%02d", n);
+    esp_err_t err = books_write_extra(id, ext, buf, len);
+    free(buf);
+    if (err != ESP_OK) {
+        return send_error(req, "400 Bad Request", "book missing or storage full");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+// The picture shown while the device is off (power.h): body = 296x128 baseline JPEG,
+// prepared by the page. DELETE goes back to the plain power symbol.
+static esp_err_t offscreen_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char *buf;
+    int len;
+    esp_err_t got = recv_body(req, &buf, &len);
+    if (got != ESP_OK) {
+        return got == ESP_FAIL ? ESP_FAIL : ESP_OK;
+    }
+    FILE *f = fopen(POWER_OFF_PICTURE, "wb");
+    bool ok = f && fwrite(buf, 1, len, f) == (size_t)len;
+    if (f) {
+        fclose(f);
+    }
+    free(buf);
+    if (!ok) {
+        remove(POWER_OFF_PICTURE);
+        return send_error(req, "500 Internal Server Error", "couldn't save the picture");
+    }
+    set_activity("New picture for the off screen", -1);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t offscreen_delete(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    remove(POWER_OFF_PICTURE);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+// The home screen's grid: ?rows=1|2&cols=3..5. The board redraws its menu at once.
+static esp_err_t menu_layout_post(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char num[8];
+    int rows = query(req, "rows", num, sizeof(num)) ? atoi(num) : 0;
+    int cols = query(req, "cols", num, sizeof(num)) ? atoi(num) : 0;
+    if (rows < 1 || rows > 2 || cols < 3 || cols > 5) {
+        return send_error(req, "400 Bad Request", "rows 1-2, cols 3-5");
+    }
+    settings_set_i32(SETTING_MENU_ROWS, rows);
+    settings_set_i32(SETTING_MENU_COLS, cols);
+    buttons_post(BUTTON_APPS_CHANGED);                      // main redraws the menu if it's showing
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 static esp_err_t words_get(httpd_req_t *req)
@@ -1015,8 +1123,13 @@ static esp_err_t podcasts_feed_post(httpd_req_t *req)
     char new_id[9] = "";
     const char *err = NULL;
     if (cJSON_IsString(url)) {
-        if (strlen(url->valuestring) >= sizeof(((pod_feed_t *)0)->url) || !podcasts_add_feed(url->valuestring, new_id)) {
-            err = "Couldn't add it: not an http(s) address, already added, too many feeds, or no card";
+        if (strlen(url->valuestring) >= sizeof(((pod_feed_t *)0)->url)) {
+            err = "That address is too long";
+        } else {
+            pod_add_result_t r = podcasts_add_feed(url->valuestring, new_id);
+            if (r != POD_ADD_OK) {
+                err = podcasts_add_error(r);
+            }
         }
     } else if (cJSON_IsString(id) && cJSON_IsObject(opt)) {
         pod_feed_t f;
@@ -1132,6 +1245,378 @@ static esp_err_t podcasts_wanted_post(httpd_req_t *req)
 
 // ---------- start ----------
 
+// ---------- SD card file browser (the page's "SD card" section) ----------
+//
+// Paths are card paths ("/Music/Album/01.mp3"), URL-encoded in ?p=. They can't leave the
+// card: "." and ".." segments and backslashes are refused. Uploads come in chunks like
+// books (?offset=&total=), into "<name>.upl", renamed when the last chunk lands.
+
+#define FILES_LIST_MAX  2000            // entries listed per folder
+#define FILES_DL_CHUNK  (16 * 1024)
+
+// ?key= as a full path on the card ("/sdcard/Music"). False if missing or not allowed.
+static bool card_path_arg(httpd_req_t *req, const char *key, char *out, size_t size)
+{
+    static char q[CONFIG_HTTPD_MAX_URI_LEN + 1];            // httpd runs one request at a time
+    char rel[512];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, key, rel, sizeof(rel)) != ESP_OK) {
+        return false;
+    }
+    url_decode(rel);
+    if (rel[0] != '/' || strchr(rel, '\\')) {
+        return false;
+    }
+    for (const char *seg = rel; seg && *seg; ) {            // no "." or ".." segments
+        seg++;
+        size_t n = strcspn(seg, "/");
+        if ((n == 1 && seg[0] == '.') || (n == 2 && seg[0] == '.' && seg[1] == '.')) {
+            return false;
+        }
+        seg = strchr(seg, '/');
+    }
+    size_t len = strlen(rel);
+    while (len > 1 && rel[len - 1] == '/') {
+        rel[--len] = '\0';                                  // "/Music/" -> "/Music"
+    }
+    int n = snprintf(out, size, "%s%s", SDCARD_ROOT, strcmp(rel, "/") ? rel : "");
+    return n > 0 && n < (int)size;
+}
+
+// The token may come in ?t= (a download link can't send headers)
+static bool authorized_or_query(httpd_req_t *req)
+{
+    if (authorized(req)) {
+        return true;
+    }
+    char t[TOKEN_LEN + 1];
+    if (!query(req, "t", t, sizeof(t)) || strlen(t) != TOKEN_LEN) {
+        return false;
+    }
+    bool ok = false;
+    xSemaphoreTake(pair_lock, portMAX_DELAY);
+    for (int i = 0; i < TOKENS && !ok; i++) {
+        ok = tokens[i][0] && strcmp(tokens[i], t) == 0;
+    }
+    xSemaphoreGive(pair_lock);
+    return ok;
+}
+
+// mkdir -p for a full path ("/sdcard/a/b/c"): each level below /sdcard
+static void make_dirs(const char *path)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s", path);
+    for (char *s = p + strlen(SDCARD_ROOT) + 1; *s; s++) {
+        if (*s == '/') {
+            *s = '\0';
+            mkdir(p, 0777);
+            *s = '/';
+        }
+    }
+    mkdir(p, 0777);
+}
+
+// A change at `path` (full path) inside the music folder: the Music app rescans on next open
+static void music_touched(const char *path)
+{
+    char dir[128], full[160];
+    settings_get_str(SETTING_MUSIC_DIR, dir, sizeof(dir), SETTING_MUSIC_DIR_DEFAULT);
+    snprintf(full, sizeof(full), "%s%s", SDCARD_ROOT, strcmp(dir, "/") ? dir : "");
+    size_t n = strlen(full);
+    if (!strncasecmp(path, full, n) && (path[n] == '/' || path[n] == '\0')) {
+        musicdb_set_stale();
+    }
+}
+
+// Stops the player if its file is `path` or inside it, before it's deleted or moved
+static void release_player(const char *path)
+{
+    player_status_t ps;
+    player_status(&ps);
+    size_t n = strlen(path);
+    if (ps.index >= 0 && !strncmp(ps.path, path, n) && (ps.path[n] == '\0' || ps.path[n] == '/')) {
+        player_stop();
+    }
+}
+
+static esp_err_t files_list(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char path[512];
+    if (!card_path_arg(req, "p", path, sizeof(path))) {
+        return send_error(req, "400 Bad Request", "bad path");
+    }
+    if (!sdcard_mount()) {
+        return send_error(req, "503 Service Unavailable", "no microSD card (or not FAT32)");
+    }
+    DIR *d = opendir(path);
+    if (d == NULL) {
+        return send_error(req, "404 Not Found", "no such folder");
+    }
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "path", path[strlen(SDCARD_ROOT)] ? path + strlen(SDCARD_ROOT) : "/");
+    uint64_t total = 0, free_bytes = 0;
+    esp_vfs_fat_info(SDCARD_ROOT, &total, &free_bytes);
+    cJSON_AddNumberToObject(j, "total", (double)total);
+    cJSON_AddNumberToObject(j, "free", (double)free_bytes);
+    cJSON *list = cJSON_AddArrayToObject(j, "entries");
+    struct dirent *e;
+    char full[768];
+    int count = 0;
+    while ((e = readdir(d)) != NULL && count < FILES_LIST_MAX) {
+        size_t nl = strlen(e->d_name);
+        if (nl > 4 && !strcmp(e->d_name + nl - 4, ".upl")) {
+            continue;                                       // an upload in progress
+        }
+        snprintf(full, sizeof(full), "%s/%s", path, e->d_name);
+        struct stat st;
+        bool dir = e->d_type == DT_DIR;
+        cJSON *it = cJSON_CreateObject();
+        cJSON_AddStringToObject(it, "n", e->d_name);
+        cJSON_AddBoolToObject(it, "d", dir);
+        if (stat(full, &st) == 0) {
+            cJSON_AddNumberToObject(it, "s", dir ? 0 : (double)st.st_size);
+            cJSON_AddNumberToObject(it, "t", (double)st.st_mtime);
+        }
+        cJSON_AddItemToArray(list, it);
+        count++;
+    }
+    closedir(d);
+    cJSON_AddBoolToObject(j, "truncated", count >= FILES_LIST_MAX);
+    return send_json(req, j, NULL);
+}
+
+static esp_err_t files_get(httpd_req_t *req)
+{
+    if (!authorized_or_query(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char path[512];
+    if (!card_path_arg(req, "p", path, sizeof(path)) || !sdcard_mount()) {
+        return send_error(req, "400 Bad Request", "bad path or no card");
+    }
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return send_error(req, "404 Not Found", "no such file");
+    }
+    // Save under its own name (RFC 5987: UTF-8, percent-encoded)
+    const char *name = strrchr(path, '/') + 1;
+    static char disp[600];
+    int o = snprintf(disp, sizeof(disp), "attachment; filename*=UTF-8''");
+    for (const unsigned char *c = (const unsigned char *)name; *c && o < (int)sizeof(disp) - 4; c++) {
+        o += isalnum(*c) || strchr("-._~", *c) ? snprintf(disp + o, 2, "%c", *c) : snprintf(disp + o, 4, "%%%02X", *c);
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    char *buf = heap_caps_malloc(FILES_DL_CHUNK, MALLOC_CAP_SPIRAM);
+    esp_err_t err = buf ? ESP_OK : ESP_ERR_NO_MEM;
+    size_t n;
+    while (err == ESP_OK && (n = fread(buf, 1, FILES_DL_CHUNK, f)) > 0) {
+        err = httpd_resp_send_chunk(req, buf, n);
+    }
+    fclose(f);
+    free(buf);
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t files_put(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char path[512], num[24];
+    if (!card_path_arg(req, "p", path, sizeof(path)) || strlen(path) <= strlen(SDCARD_ROOT) + 1) {
+        return send_error(req, "400 Bad Request", "bad path");
+    }
+    if (!query(req, "offset", num, sizeof(num))) {
+        return send_error(req, "400 Bad Request", "missing offset");
+    }
+    uint32_t offset = strtoul(num, NULL, 10);
+    if (!query(req, "total", num, sizeof(num))) {
+        return send_error(req, "400 Bad Request", "missing total");
+    }
+    uint32_t total = strtoul(num, NULL, 10);
+    if (!sdcard_mount()) {
+        return send_error(req, "503 Service Unavailable", "no microSD card (or not FAT32)");
+    }
+    char tmp[520];
+    snprintf(tmp, sizeof(tmp), "%s.upl", path);
+    struct stat st;
+    uint32_t have = offset == 0 ? 0 : (stat(tmp, &st) == 0 ? (uint32_t)st.st_size : 0);
+    cJSON *j = cJSON_CreateObject();
+    if (offset != have) {                                   // out of step: the page resumes from "have"
+        cJSON_AddNumberToObject(j, "have", have);
+        return send_json(req, j, "409 Conflict");
+    }
+    char *buf = NULL;
+    int len = 0;
+    if (total > 0) {
+        esp_err_t got = recv_body(req, &buf, &len);
+        if (got != ESP_OK) {
+            cJSON_Delete(j);
+            return got == ESP_FAIL ? ESP_FAIL : ESP_OK;
+        }
+    }
+    if (offset == 0) {
+        char parent[512];
+        snprintf(parent, sizeof(parent), "%s", path);
+        *strrchr(parent, '/') = '\0';
+        make_dirs(parent);
+    }
+    FILE *f = fopen(tmp, offset == 0 ? "wb" : "ab");
+    bool ok = f && (len == 0 || fwrite(buf, 1, len, f) == (size_t)len);
+    if (f && fclose(f) != 0) {
+        ok = false;
+    }
+    free(buf);
+    if (!ok) {
+        cJSON_AddStringToObject(j, "error", "couldn't write to the card (full?)");
+        return send_json(req, j, "507 Insufficient Storage");
+    }
+    have = offset + len;
+    bool done = have >= total;
+    if (done) {
+        release_player(path);
+        remove(path);                                       // replaces a file of the same name
+        if (rename(tmp, path) != 0) {
+            cJSON_AddStringToObject(j, "error", "couldn't rename the upload");
+            return send_json(req, j, "500 Internal Server Error");
+        }
+        music_touched(path);
+        char text[sizeof(activity)];
+        snprintf(text, sizeof(text), "Received: %s", strrchr(path, '/') + 1);
+        set_activity(text, -1);
+    } else if (total && (uint64_t)have * 10 / total != (uint64_t)offset * 10 / total) {
+        char text[sizeof(activity)];
+        snprintf(text, sizeof(text), "Receiving %s", strrchr(path, '/') + 1);
+        set_activity(text, (int)((uint64_t)have * 100 / total));
+    }
+    cJSON_AddNumberToObject(j, "have", have);
+    cJSON_AddBoolToObject(j, "done", done);
+    return send_json(req, j, NULL);
+}
+
+static esp_err_t files_mkdir(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char path[512];
+    if (!card_path_arg(req, "p", path, sizeof(path)) || !sdcard_mount()) {
+        return send_error(req, "400 Bad Request", "bad path or no card");
+    }
+    make_dirs(path);
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return send_error(req, "400 Bad Request", "couldn't make the folder");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+// Deletes a file, or a folder with everything in it. Names are gathered a batch at a time,
+// so a folder isn't changed while it's being read. Returns how many items couldn't go.
+static int delete_tree(char *path, size_t size, int depth)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        return remove(path) == 0 ? 0 : 1;
+    }
+    if (depth > 12) {
+        return 1;
+    }
+    int failed = 0;
+    size_t base = strlen(path);
+    enum { BATCH = 16 };
+    char (*names)[256] = malloc(BATCH * sizeof(*names));
+    while (names) {
+        int n = 0;
+        DIR *d = opendir(path);
+        struct dirent *e;
+        while (d && n < BATCH && (e = readdir(d)) != NULL) {
+            snprintf(names[n++], sizeof(names[0]), "%s", e->d_name);
+        }
+        if (d) {
+            closedir(d);
+        }
+        int gone = 0;
+        for (int i = 0; i < n; i++) {
+            if (base + 1 + strlen(names[i]) >= size) {
+                failed++;
+                continue;
+            }
+            snprintf(path + base, size - base, "/%s", names[i]);
+            int f = delete_tree(path, size, depth + 1);
+            gone += f == 0;
+            failed += f;
+            path[base] = '\0';
+        }
+        if (n == 0 || gone == 0) {
+            break;                                          // empty, or nothing more can go
+        }
+    }
+    free(names);
+    if (rmdir(path) != 0) {
+        failed++;
+    }
+    return failed;
+}
+
+static esp_err_t files_delete(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    static char path[1024];
+    if (!card_path_arg(req, "p", path, sizeof(path)) || strlen(path) <= strlen(SDCARD_ROOT) + 1 || !sdcard_mount()) {
+        return send_error(req, "400 Bad Request", "bad path or no card");
+    }
+    release_player(path);
+    music_touched(path);
+    char shown[300];
+    snprintf(shown, sizeof(shown), "%.299s", path + strlen(SDCARD_ROOT));
+    int failed = delete_tree(path, sizeof(path), 0);
+    ESP_LOGI(TAG, "deleted %s%s", shown, failed ? " (some items stayed)" : "");
+    if (failed) {
+        return send_error(req, "500 Internal Server Error", "some items couldn't be deleted");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t files_move(httpd_req_t *req)
+{
+    if (!authorized(req)) {
+        return send_error(req, "401 Unauthorized", "not paired");
+    }
+    char from[512], to[512];
+    if (!card_path_arg(req, "p", from, sizeof(from)) || !card_path_arg(req, "to", to, sizeof(to)) ||
+        strlen(from) <= strlen(SDCARD_ROOT) + 1 || strlen(to) <= strlen(SDCARD_ROOT) + 1 || !sdcard_mount()) {
+        return send_error(req, "400 Bad Request", "bad path or no card");
+    }
+    struct stat st;
+    if (stat(to, &st) == 0) {
+        return send_error(req, "409 Conflict", "something with that name is already there");
+    }
+    release_player(from);
+    music_touched(from);
+    music_touched(to);
+    if (rename(from, to) != 0) {
+        return send_error(req, "400 Bad Request", "couldn't rename it");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 esp_err_t webui_start(void)
 {
     if (pair_lock == NULL) {
@@ -1144,7 +1629,7 @@ esp_err_t webui_start(void)
     upload_percent = -1;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 36;
+    cfg.max_uri_handlers = 48;
     cfg.lru_purge_enable = true;                            // drop idle connections when busy
     cfg.recv_wait_timeout = 15;                             // seconds per upload read
 
@@ -1160,6 +1645,15 @@ esp_err_t webui_start(void)
         {.uri = "/api/books",   .method = HTTP_GET,    .handler = books_get_handler},
         {.uri = "/api/books",   .method = HTTP_DELETE, .handler = books_delete_handler},
         {.uri = "/api/upload",  .method = HTTP_POST,   .handler = upload_post},
+        {.uri = "/api/books/picture", .method = HTTP_POST, .handler = book_picture_post},
+        {.uri = "/api/offscreen", .method = HTTP_POST,   .handler = offscreen_post},
+        {.uri = "/api/offscreen", .method = HTTP_DELETE, .handler = offscreen_delete},
+        {.uri = "/api/files",       .method = HTTP_GET,    .handler = files_list},
+        {.uri = "/api/files",       .method = HTTP_DELETE, .handler = files_delete},
+        {.uri = "/api/files/get",   .method = HTTP_GET,    .handler = files_get},
+        {.uri = "/api/files/put",   .method = HTTP_POST,   .handler = files_put},
+        {.uri = "/api/files/mkdir", .method = HTTP_POST,   .handler = files_mkdir},
+        {.uri = "/api/files/move",  .method = HTTP_POST,   .handler = files_move},
         {.uri = "/api/words",   .method = HTTP_GET,    .handler = words_get},
         {.uri = "/api/apps",    .method = HTTP_GET,    .handler = apps_get},
         {.uri = "/api/apps",    .method = HTTP_DELETE, .handler = apps_delete},
@@ -1170,6 +1664,7 @@ esp_err_t webui_start(void)
         {.uri = "/api/apps/settings", .method = HTTP_POST, .handler = apps_settings_post},
         {.uri = "/api/menu",    .method = HTTP_GET,    .handler = menu_get},
         {.uri = "/api/menu",    .method = HTTP_POST,   .handler = menu_post},
+        {.uri = "/api/menu/layout", .method = HTTP_POST, .handler = menu_layout_post},
         {.uri = "/api/pair",    .method = HTTP_POST,   .handler = pair_post},
         {.uri = "/api/pair/verify", .method = HTTP_POST, .handler = pair_verify_post},
         {.uri = "/api/music",   .method = HTTP_GET,    .handler = music_get},

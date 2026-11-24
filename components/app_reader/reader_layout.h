@@ -16,3 +16,10 @@
 // they are part of a character cut off by the window). draw = also draw into the frame
 // buffer. Returns the number of bytes the page uses (at least 1 if len > 0).
 int reader_layout_page(const char *text, int len, bool at_end, bool draw);
+
+// Pictures: a picture line (BOOK_PICTURE_MARK + number) gets a page of its own, drawn in
+// 4 greys from <book>.Inn. Set the book before drawing pages.
+void reader_layout_set_book(const char *id);
+
+// The page starting at text is a picture page (possibly after a chapter-title line)
+bool reader_layout_is_picture(const char *text, int len);

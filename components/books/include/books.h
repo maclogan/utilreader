@@ -1,10 +1,14 @@
 /*
- * E-book storage on the "books" flash partition (FAT, mounted at /books), shared by the
- * web interface (uploads, deletes) and the reader app (reading). See README.md.
+ * E-book storage, shared by the web interface (uploads, deletes) and the reader app
+ * (reading). The books live in a folder on the microSD card (default /Books, chosen in
+ * Settings) or, if chosen there, on the "books" flash partition (FAT, /books). See README.md.
  *
  * A book is one UTF-8 text file, <ID>.TXT, where ID is 8 hex digits chosen by the uploader:
  *   line 1      the title
  *   the rest    the text, one paragraph per line
+ * A line BOOK_PICTURE_MARK + a number ("\x1D" "7") stands for a picture, <ID>.I07: a small
+ * baseline JPEG the web page made from the e-book's image (the cover is usually picture 0,
+ * right after the title). The reader gives each picture a page of its own.
  * A line starting with BOOK_CHAPTER_MARK ('\x1E', invisible) marks the start of a chapter;
  * the rest of that line is the chapter's title (added by the web page's converter).
  * The reader keeps a page index (<ID>.IDX) and chapter list (<ID>.CHP) next to the book,
@@ -15,6 +19,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -22,6 +27,8 @@
 #define BOOK_ID_LEN     8               // hex digits
 #define BOOK_TITLE_MAX  96              // bytes of title kept (UTF-8)
 #define BOOK_CHAPTER_MARK '\x1E'         // ASCII "record separator": starts a chapter-title line
+#define BOOK_PICTURE_MARK '\x1D'         // ASCII "group separator": starts a picture line
+#define BOOK_PICTURES_MAX 100           // pictures per book: <ID>.I00 .. <ID>.I99
 
 typedef struct {
     char id[BOOK_ID_LEN + 1];
@@ -32,6 +39,14 @@ typedef struct {
 
 // Mounts the partition (formatting it the first time). Call once at start-up.
 bool books_init(void);
+
+// Where the books are: a folder on the card ("/Books", the default) or card_dir "" =
+// internal flash. The books move along (page indexes, chapters and pictures too). False if
+// some couldn't be moved (no card, card full); those stay where they were. Books still in
+// internal flash while the location is on the card move there by themselves the first time
+// the card is used after a start.
+bool books_set_location(const char *card_dir);
+void books_location(char *out, size_t size);      // "" or the card folder
 
 // True for a well-formed ID (8 hex digits)
 bool books_valid_id(const char *id);
@@ -78,3 +93,14 @@ esp_err_t books_write_index(const char *id, const uint32_t *pages, int count);
 // Deleted with the book and when it's replaced. Read returns bytes read, -1 if missing.
 int books_read_extra(const char *id, const char *ext, void *buf, int max);
 esp_err_t books_write_extra(const char *id, const char *ext, const void *data, int len);
+
+// The file name of a per-book file (to open it directly, e.g. a picture for the JPEG decoder)
+void books_extra_path(const char *id, const char *ext, char *out, size_t size);
+
+// Books put in the books folder as files (.epub, .txt: copied onto the card or uploaded with
+// the web page's SD card browser) are converted once into the format above (books_import.c).
+// How many are waiting, and convert the next one: false when none are left; otherwise
+// *name = its file name without the extension and *converted = whether it worked. Slow (a
+// second or more per book): the Reader does it when opened, with a message on screen.
+int books_import_pending(void);
+bool books_import_next(char *name, size_t size, bool *converted);

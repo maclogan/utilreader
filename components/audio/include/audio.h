@@ -3,8 +3,7 @@
  * writes PCM; a high-priority output task moves it from a PSRAM ring buffer (about 1 s) to
  * I2S, so slow SD reads or e-paper refreshes don't cause dropouts. See README.md.
  *
- * Pins: BCLK GPIO4, WS GPIO5, data out GPIO43 (header TX). GPIO3 is kept for the
- * microphone's data. Output is always 32-bit stereo (BCLK = 64 x rate, which the DAC's PLL
+ * Pins: BCLK GPIO4, WS GPIO5, data out GPIO43 (header TX), microphone data in GPIO3. Output is always 32-bit stereo (BCLK = 64 x rate, which the DAC's PLL
  * multiplies up to its own clocks).
  */
 #pragma once
@@ -45,3 +44,29 @@ int audio_volume(void);
 void audio_stop(void);
 
 bool audio_running(void);
+
+// ---- microphone (INMP441 on GPIO3, sharing BCLK / WS) ----
+
+// Starts recording at `rate` Hz (16000 for speech). Only while playback is stopped (they
+// share the I2S clocks): false if audio_start() is running. Drops the first ~0.1 s, while the
+// microphone settles.
+bool audio_rec_start(uint32_t rate);
+
+// Reads up to `frames` 16-bit mono samples (DC removed, +24 dB gain). Blocks until some
+// arrive; returns how many (0 if stopped or on an error).
+size_t audio_rec_read(int16_t *out, size_t frames);
+
+void audio_rec_stop(void);
+bool audio_recording(void);             // audio_start() refuses while this is true
+
+// ---- headset detection (the TLV320 watches the jack's fourth contact) ----
+
+#define AUDIO_HEADSET_BUTTON 1          // the inline button was pressed (since the last poll)
+#define AUDIO_HEADSET_PLUG   2          // headphones were plugged in or out
+
+// Turns detection on (it then works whether or not anything plays). False if there's no DAC.
+bool audio_headset_init(void);
+
+// What happened since the last call (AUDIO_HEADSET_* bits), and the state now: *plugged,
+// *pressed (button held). -1 on an error (no DAC).
+int audio_headset_poll(bool *plugged, bool *pressed);

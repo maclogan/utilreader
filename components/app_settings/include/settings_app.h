@@ -1,5 +1,6 @@
 /*
- * Settings app: set the date and time by hand, and turn the screen upside down.
+ * Settings app: set the date and time by hand, turn the screen upside down, choose the
+ * music / podcasts / e-books folders and format the microSD card (see README.md).
  *
  *  +--+--------------------------------------+
  *  |  |##Date######2026-11-19################|  <- highlighted row

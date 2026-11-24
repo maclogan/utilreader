@@ -71,4 +71,40 @@ menu "Hardware"
             the tag "epd_diag". Adds about 20 s to start-up. Use it when bringing up new
             wiring; see components/display/README.md.
 
+    config DISPLAY_FAST_REFRESH
+        bool "Fast full refresh for black/white screens"
+        default y
+        help
+            Full refreshes use the controller's short waveform (about half the time of
+            the normal one, with less flashing). It clears ghosting less thoroughly, so
+            every 10th full refresh is still the normal one. Screens with grey (album
+            art) always use the grey waveform. Turn off if images look washed out in
+            the cold.
+
+    config DISPLAY_PICTURE_GAMMA
+        int "Picture brightness: gamma x 100 (lower = lighter), the default"
+        range 30 100
+        default 75
+        help
+            Pictures (album art, book pictures, the off screen photo) are lightened
+            before they're dithered to the panel's 4 greys: each pixel becomes
+            255 x (value / 255) ^ (this / 100). The panel's two greys look darker than
+            their nominal levels, so without it (100) pictures come out too dark.
+            Lower values lift the mid-tones more; black and white stay as they are.
+            Only the default: Settings > Darkness changes it on the device.
+
+    config BUTTONS_SERIAL_KEYS
+        bool "Accept keyboard presses over USB serial as button presses (testing)"
+        default y
+        help
+            For testing before the controls are wired: keys typed into `idf.py monitor`
+            (or any serial terminal on the USB port) act as the buttons.
+              Left arrow / a   = left      A = left hold
+              Right arrow / d  = right     D = right hold
+              Enter / space    = select    S, or hold Enter = select hold
+              Backspace / b    = back      h = home
+              , or [ or <      = left hold (previous track), no left press first
+              . or ] or >      = right hold (next track)
+            Turn off once the real buttons are soldered.
+
 endmenu

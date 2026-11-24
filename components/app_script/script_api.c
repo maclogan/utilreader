@@ -13,6 +13,7 @@
 #include "epd.h"
 #include "esp_timer.h"                  // esp_timer_get_time(): time.uptime()
 #include "font16.h"
+#include "image.h"                      // screen.image()
 #include "lauxlib.h"
 #include "local_time.h"
 #include "script_internal.h"
@@ -138,11 +139,76 @@ static int screen_bitmap(lua_State *L)
     return 0;
 }
 
+// Draws a decoded JPEG: args at idx = x, y, [max_w], [max_h], [mode]. mode "grey" (the
+// default: 4 greys, shown by full refreshes) or "bw" (dithered to black and white, fine for
+// partial refreshes). Returns the drawn width and height.
+static int draw_decoded(lua_State *L, bool ok, image_grey_t *img, int idx)
+{
+    if (!ok) {
+        lua_pushnil(L);
+        lua_pushstring(L, "not a baseline JPEG (PNG and progressive JPEG aren't supported)");
+        return 2;
+    }
+    image_auto_levels(img);
+    const char *mode = luaL_optstring(L, idx + 4, "grey");
+    epd_draw_grey8(int_arg(L, idx), int_arg(L, idx + 1), img->w, img->h, img->pix, img->w,
+                   strcmp(mode, "bw") != 0);
+    lua_pushinteger(L, img->w);
+    lua_pushinteger(L, img->h);
+    image_free(img);
+    return 2;
+}
+
+static void image_box(lua_State *L, int idx, int *w, int *h)
+{
+    *w = (int)luaL_optinteger(L, idx + 2, EPD_WIDTH);
+    *h = (int)luaL_optinteger(L, idx + 3, EPD_HEIGHT);
+    luaL_argcheck(L, *w > 0 && *w <= EPD_WIDTH && *h > 0 && *h <= EPD_HEIGHT, idx + 2, "size must fit the screen");
+}
+
+// image(file, x, y, [max_w], [max_h], [mode]): a JPEG from the app's data folder (saved with
+// storage.write) or, failing that, from its package
+static int screen_image(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    luaL_argcheck(L, script_valid_file(name), 1, "file names: letters, digits, . _ - (up to 32)");
+    int w, h;
+    image_box(L, 2, &w, &h);
+    script_t *s = script_from_lua(L);
+    char path[96];
+    image_grey_t img;
+    snprintf(path, sizeof(path), "%s/data/%s", s->dir, name);
+    bool ok = image_jpeg_grey_file(path, w, h, &img);
+    if (!ok) {
+        snprintf(path, sizeof(path), "%s/%s", s->dir, name);
+        ok = image_jpeg_grey_file(path, w, h, &img);
+    }
+    return draw_decoded(L, ok, &img, 2);
+}
+
+// image_data(jpeg, x, y, [max_w], [max_h], [mode]): a JPEG held in a string (e.g. a net.get body)
+static int screen_image_data(lua_State *L)
+{
+    size_t len;
+    const char *data = luaL_checklstring(L, 1, &len);
+    int w, h;
+    image_box(L, 2, &w, &h);
+    image_grey_t img;
+    bool ok = false;
+    FILE *f = fmemopen((void *)data, len, "rb");
+    if (f) {
+        ok = image_jpeg_grey(f, 0, len, w, h, &img);
+        fclose(f);
+    }
+    return draw_decoded(L, ok, &img, 2);
+}
+
 static const luaL_Reg screen_funcs[] = {
     {"begin", screen_begin}, {"finish", screen_finish}, {"clear", screen_clear},
     {"pixel", screen_pixel}, {"line", screen_line}, {"rect", screen_rect},
     {"circle", screen_circle}, {"text", screen_text}, {"text_width", screen_text_width},
     {"text16", screen_text16}, {"text16_width", screen_text16_width}, {"bitmap", screen_bitmap},
+    {"image", screen_image}, {"image_data", screen_image_data},
     {NULL, NULL},
 };
 

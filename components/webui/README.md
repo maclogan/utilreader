@@ -59,6 +59,18 @@ All but `/` and the pairing calls need `X-Token`; without a valid one they retur
 | `GET /api/podcasts/episodes?id=ID` | `[{"id","t","d","dur","f"}]` newest first (streamed); `f` flags: 1 picked, 2 played, 4 on the card |
 | `POST /api/podcasts/wanted?id=ID` | Body `{"ids":[...]}`: the episodes picked in Custom mode |
 
+| `POST /api/books/picture?id=&n=` | A picture for an uploaded book (body: baseline JPEG, n = 0-99) |
+| `POST /api/offscreen` / `DELETE` | The picture shown while the device is off (body: 296x128 JPEG) / remove it |
+| `GET /api/files?p=/Music` | SD card browser: a folder's entries `{path, free, total, entries: [{n, d, s, t}]}` |
+| `GET /api/files/get?p=&t=` | Download a file (the token may come in `t`, as a plain link can't send headers) |
+| `POST /api/files/put?p=&offset=&total=` | Upload a file in chunks (up to 64 KB each, into `<name>.upl`, renamed at the end; 409 + `have` to resume) |
+| `POST /api/files/mkdir?p=` | Make a folder (and any missing parents) |
+| `POST /api/files/move?p=&to=` | Rename or move |
+| `DELETE /api/files?p=` | Delete a file, or a folder with everything in it |
+
+File paths are card paths, URL-encoded, and can't leave the card (`.` / `..` segments are
+refused). A file the player has open is stopped before it's deleted, replaced or moved.
+
 ## The app catalog
 
 The **App catalog** section fetches a catalog's `index.json` straight from the browser

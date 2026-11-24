@@ -45,6 +45,11 @@ typedef struct {
 musicdb_status_t musicdb_scan(const char *dir, void (*progress)(int done, int total));
 
 musicdb_status_t musicdb_status(void);
+
+// Files in the music folder changed since the last scan (the web page's SD browser added,
+// deleted or renamed some): the Music app rescans when it next opens. Any task.
+void musicdb_set_stale(void);
+bool musicdb_stale(void);
 const char *musicdb_dir(void);          // the folder last scanned ("/Music"), "" before
 uint32_t musicdb_generation(void);      // changes with every scan
 

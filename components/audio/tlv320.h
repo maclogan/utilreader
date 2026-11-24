@@ -32,5 +32,13 @@ void tlv320_mute(bool mute);
 void tlv320_set_volume_db(float db);
 
 // Powers everything down (headphone driver first, then DAC and PLL). The chip keeps its
-// I2C interface and draws microamps.
+// I2C interface and draws microamps. Headset detection keeps working.
 void tlv320_stop(void);
+
+// Headset detection on the jack's fourth contact (MICDET), also while nothing plays. False if
+// the chip doesn't answer. tlv320_start() sets it up again after its reset.
+bool tlv320_headset_init(void);
+
+// The headset state now (in, button held) and what happened since the last call (a button
+// press, a plug in or out: the chip's sticky flags, cleared by reading). False on an I2C error.
+bool tlv320_headset_poll(bool *in, bool *pressed_now, bool *button_event, bool *plug_event);

@@ -3,7 +3,7 @@
  * episodes to keep, and the updater that refreshes feeds and downloads episodes over Wi-Fi.
  * Shared by the Podcasts app and the web interface. See README.md.
  *
- * On the card (/sdcard/Podcasts):
+ * On the card, in the folder chosen in Settings (default /sdcard/Podcasts):
  *   feeds.tsv               the feeds and their settings
  *   <feed id>/episodes.tsv  every episode seen in the feed (newest 300)
  *   <feed id>/<episode id>.mp3 (.m4a ...)   downloaded episodes (".part" while downloading)
@@ -15,7 +15,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PODCASTS_ROOT           "/sdcard/Podcasts"
 #define PODCASTS_MAX_FEEDS      50
 #define PODCASTS_MAX_EPISODES   300
 
@@ -66,7 +65,17 @@ pod_options_t podcasts_effective(const pod_options_t *feed_opt);
 // ---- feeds ----
 int podcasts_feeds(pod_feed_t *out, int max);           // count; sorted by title
 bool podcasts_feed(const char *id, pod_feed_t *out);
-bool podcasts_add_feed(const char *url, char *id_out);  // false if the card is missing / full / already there
+typedef enum {
+    POD_ADD_OK,
+    POD_ADD_BAD_URL,                    // not http:// or https://
+    POD_ADD_DUPLICATE,                  // already subscribed (*id_out is set)
+    POD_ADD_FULL,                       // PODCASTS_MAX_FEEDS already
+    POD_ADD_NO_CARD,                    // the card isn't there or can't be read
+    POD_ADD_WRITE_FAILED,               // the feed list couldn't be saved (card full, read-only...)
+    POD_ADD_NO_MEMORY,
+} pod_add_result_t;
+pod_add_result_t podcasts_add_feed(const char *url, char *id_out);
+const char *podcasts_add_error(pod_add_result_t r);     // a sentence for the web page
 bool podcasts_update_feed(const pod_feed_t *feed);      // replaces the feed with the same id
 bool podcasts_remove_feed(const char *id);              // with its episodes and files
 
@@ -88,6 +97,15 @@ void podcasts_set_playing(const char *feed_id, const char *ep_id);
 // Applies the keep rules to one feed: marks which episodes should be on the card and deletes
 // files that shouldn't. Returns how many wanted episodes still need downloading.
 int podcasts_apply_rules(const char *feed_id);
+
+// The podcasts folder, e.g. "/sdcard/Podcasts" (from the Settings app's choice)
+const char *podcasts_root(void);
+
+// Moves the podcasts (subscriptions, episode lists, downloads) to `card_dir` on the card
+// ("/Shows" = /sdcard/Shows) and remembers it. Stop the player first if it's playing an
+// episode. False if something couldn't be moved (what could be is moved; the old folder
+// is kept then).
+bool podcasts_set_root(const char *card_dir);
 
 // ---- the updater (podcasts_update.c) ----
 typedef struct {

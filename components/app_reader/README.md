@@ -72,6 +72,16 @@ position survives a rebuilt index (e.g. after a layout change).
 ~30 s, if a book was added or deleted. A book deleted while being read shows "This book
 was removed" at the next page turn.
 
+## Pictures
+
+E-books converted from EPUB on the web page keep their cover and pictures: the page turns each
+into a small greyscale baseline JPEG (fitted to 288 x 108) and uploads it as `<ID>.Inn`, and
+the text gets a line `\x1D` + number where it stood (`BOOK_PICTURE_MARK`). The cover is picture
+0, at the very start. The layout gives every picture line a page of its own, drawn in 4 greys
+with error-diffusion dithering and a full (grey) refresh; the page after it is a full refresh
+too, which clears the grey. Pictures the browser can't decode and tiny decorations (under
+48 px) are left out. Up to 100 per book.
+
 ## Limits
 
 | | |

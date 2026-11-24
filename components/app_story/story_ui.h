@@ -1,6 +1,8 @@
 /*
- * Story app screen: as many whole sentences as fit in 4 rows, with the highlighted word
- * looked up underneath. The title and page number stand in the bar on the left
+ * Story app screen: as many whole sentences as fit in 6 rows (the full height). While a word is
+ * selected, a box with its pinyin and meaning floats over the text: at the bottom, or at the top
+ * when the word would be under it. BACK hides the box and remembers the word (left / right
+ * bring it back there); a second BACK goes to the story menu. The title and page number stand in the bar on the left
  * (ui_sidebar.h), reading bottom to top.
  *
  *  +--+--------------------------------------+

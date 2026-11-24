@@ -241,17 +241,27 @@ int reader_ui_library(const book_info_t *list, const int *percents, int count, i
     full = begin(full);
     draw_header("Books", selected, count);
     if (count == 0) {
-        content_centered(50, "No books yet");
+        content_centered(34, "No books yet");
+        content_centered(52, "Best way to add them: open Transfer,");
+        content_centered(64, "then \"Add a book\" on its web page");
+        content_centered(76, "(keeps covers, pictures and chapters).");
+        content_centered(94, ".epub/.txt files put in the Books folder");
+        content_centered(106, "also work, but text only.");
     }
     const void *ctx[2] = {list, percents};
     int steps = draw_list(ctx, library_item, count, selected, marquee);
-    content_centered(FOOTER_Y, "Add books with the Transfer app");
+    if (count > 0) {
+        content_centered(FOOTER_Y, "Add books: Transfer > web page > Add a book");
+    }
     finish(full);
     return steps;
 }
 
 void reader_ui_page(const char *text, int len, bool at_end, const char *left, const char *right, bool full)
 {
+    if (reader_layout_is_picture(text, len)) {
+        full = true;                    // grey needs a full refresh (and the page after clears it)
+    }
     full = begin(full);
     reader_layout_page(text, len, at_end, true);
     epd_draw_text(MARGIN, FOOTER_Y, left, 1, EPD_BLACK);
@@ -296,17 +306,20 @@ void reader_ui_message(const char *title, const char *detail)
 
 void reader_ui_draw_app_icon(int cx, int cy)
 {
-    // Two pages meeting at a spine, with a few lines of "text"
-    epd_draw_line(cx - 16, cy - 10, cx, cy - 6, EPD_BLACK);     // left page top edge
-    epd_draw_line(cx, cy - 6, cx + 16, cy - 10, EPD_BLACK);     // right page top edge
-    epd_draw_line(cx - 16, cy + 10, cx, cy + 14, EPD_BLACK);    // bottom edges
-    epd_draw_line(cx, cy + 14, cx + 16, cy + 10, EPD_BLACK);
-    epd_draw_line(cx - 16, cy - 10, cx - 16, cy + 10, EPD_BLACK);
-    epd_draw_line(cx + 16, cy - 10, cx + 16, cy + 10, EPD_BLACK);
-    epd_draw_line(cx, cy - 6, cx, cy + 14, EPD_BLACK);          // spine
-    for (int i = 0; i < 3; i++) {
-        int y = cy - 3 + i * 5;
-        epd_draw_line(cx - 13, y - 3, cx - 3, y - 1, EPD_BLACK);
-        epd_draw_line(cx + 3, y - 1, cx + 13, y - 3, EPD_BLACK);
+    // An open book in solid black (readable from across the room): two pages rising from the
+    // spine to their outer corners, a white gutter between them, white lines of "text"
+    const int half = 17, top_out = -12, top_in = -8, bot_out = 10, bot_in = 14;
+    for (int i = 1; i <= half; i++) {                       // i = distance from the spine
+        int top = cy + top_in + (top_out - top_in) * i / half;
+        int bot = cy + bot_in + (bot_out - bot_in) * i / half;
+        epd_draw_line(cx - i, top, cx - i, bot, EPD_BLACK); // left page
+        epd_draw_line(cx + i, top, cx + i, bot, EPD_BLACK); // right page
+    }
+    for (int k = 0; k < 3; k++) {                           // text lines, 2 px thick, following the page tilt
+        int y = cy - 5 + k * 6;
+        for (int t = 0; t < 2; t++) {
+            epd_draw_line(cx - 4, y + t, cx - 14, y - 3 + t, EPD_WHITE);
+            epd_draw_line(cx + 4, y + t, cx + 14, y - 3 + t, EPD_WHITE);
+        }
     }
 }

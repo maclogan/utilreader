@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"              // heap_caps_malloc(): the saved-words list lives in PSRAM
 #include "esp_log.h"
 #include "local_time.h"                 // local_time_offset(), local_time_synced()
+#include "flashcards_app.h"             // "Review cards": the flashcard session
 #include "review.h"                     // saved words
 #include "story.h"                      // the story itself
 #include "story_ui.h"                   // drawing
@@ -26,9 +27,10 @@ typedef enum {
     VIEW_READER,                        // the story
     VIEW_SAVED,                         // saved words list
     VIEW_WRITING,                       // waiting for a story to be written
+    VIEW_CARDS,                         // flashcard review of the saved words (app_flashcards)
 } view_t;
 
-enum { ITEM_TODAY, ITEM_SAVED, ITEM_NEW, ITEM_LEVEL, ITEM_COUNT };  // story menu entries
+enum { ITEM_TODAY, ITEM_SAVED, ITEM_CARDS, ITEM_NEW, ITEM_LEVEL, ITEM_COUNT };  // story menu entries
 
 static view_t view = VIEW_MENU;
 static int menu_sel = ITEM_TODAY;
@@ -37,6 +39,7 @@ static TickType_t retry_at = 0;         // don't start an automatic story reques
 // Reader state
 static int page = 0;                    // page on screen (index into pages[])
 static int cursor = -1;                 // selected word (index into tokens[]), -1 = none
+static int hidden_cursor = -1;          // the word BACK unselected (its box hidden): left / right resume there
 static int turns = 0;                   // page turns since the last full refresh
 
 // Saved-words state (the list is read from flash when the screen opens)
@@ -80,12 +83,19 @@ static void start_writing(void)
 
 static void draw_menu(bool full)
 {
-    char saved_label[32], level_label[32];
+    char saved_label[32], level_label[32], cards_label[32];
     snprintf(saved_label, sizeof(saved_label), "Saved words (%d)", review_count());
     snprintf(level_label, sizeof(level_label), "Level: HSK %d", story_hsk_level());
+    int due = flashcards_due_count();
+    if (due > 0) {
+        snprintf(cards_label, sizeof(cards_label), "Review cards (%d)", due);
+    } else {
+        snprintf(cards_label, sizeof(cards_label), "Review cards");
+    }
     const char *items[ITEM_COUNT] = {
         [ITEM_TODAY] = "Today's story",
         [ITEM_SAVED] = saved_label,
+        [ITEM_CARDS] = cards_label,
         [ITEM_NEW]   = worker_pending(story_job) ? "Writing..." : "New story",
         [ITEM_LEVEL] = level_label,
     };
@@ -114,6 +124,7 @@ static void rewind_reader(void)
 {
     page = 0;
     cursor = -1;
+    hidden_cursor = -1;
     turns = 0;
 }
 
@@ -180,7 +191,11 @@ static void reader_button(button_event_t event)
     const story_t *s = story_get();
     if (event == BUTTON_LEFT || event == BUTTON_RIGHT) {
         int old_page = page;
-        if (cursor < 0) {                                   // nothing selected yet: select the first word
+        if (cursor < 0 && hidden_cursor >= 0) {             // back to the word BACK unselected
+            cursor = hidden_cursor;
+            hidden_cursor = -1;
+            draw_reader(false, false);
+        } else if (cursor < 0) {                            // nothing selected yet: select the first word
             cursor = story_page_word(s, page, false);
             draw_reader(false, false);
         } else if (story_step_word(s, &page, &cursor, event == BUTTON_LEFT ? -1 : 1)) {
@@ -191,6 +206,7 @@ static void reader_button(button_event_t event)
         if (p >= 0 && p < s->page_count) {
             page = p;
             cursor = -1;                                    // each page starts with nothing selected
+            hidden_cursor = -1;
             draw_reader(false, true);
         }
     } else if (event == BUTTON_SELECT && cursor >= 0) {     // save / un-save the word
@@ -244,7 +260,20 @@ static void story_open(const app_t *self)
 
 static bool story_button(const app_t *self, button_event_t event)
 {
+    if (view == VIEW_CARDS) {
+        if (!flashcards_button(event)) {                    // BACK: the review's over
+            view = VIEW_MENU;
+            draw_menu(true);
+        }
+        return true;
+    }
     if (event == BUTTON_BACK) {
+        if (view == VIEW_READER && cursor >= 0) {           // first BACK: hide the word's box
+            hidden_cursor = cursor;                         // (left / right bring it back there)
+            cursor = -1;
+            draw_reader(false, false);
+            return true;
+        }
         if (view == VIEW_MENU) {
             return false;                                   // leave the app
         }
@@ -264,6 +293,9 @@ static bool story_button(const app_t *self, button_event_t event)
                 open_today();
             } else if (menu_sel == ITEM_SAVED) {
                 open_saved();
+            } else if (menu_sel == ITEM_CARDS) {
+                view = VIEW_CARDS;
+                flashcards_start();
             } else if (menu_sel == ITEM_NEW) {
                 open_new();
             } else {                                        // ITEM_LEVEL: cycle HSK 1 -> 6 -> 1
@@ -279,6 +311,7 @@ static bool story_button(const app_t *self, button_event_t event)
         saved_button(event);
         break;
     case VIEW_WRITING:
+    case VIEW_CARDS:
         break;                                              // only BACK/HOME do anything here
     }
     return true;

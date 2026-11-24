@@ -1,4 +1,5 @@
 #include "books.h"
+#include "books_internal.h"
 
 #include <ctype.h>                      // isxdigit()
 #include <dirent.h>                     // opendir(), readdir()
@@ -10,22 +11,186 @@
 #include "esp_vfs_fat.h"                // FAT on flash with wear levelling
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"            // the lock
-#include "settings.h"                   // reading positions
+#include "sdcard.h"                     // books kept on the card
+#include "settings.h"                   // reading positions, the location
 
 static const char *TAG = "books";
 
-#define BASE        "/books"
+#define INTERNAL    "/books"            // the flash partition's mount point
 #define PARTITION   "books"             // see partitions.csv
 #define MAX_SIZE    (3 * 1024 * 1024)   // biggest book accepted
 
 static SemaphoreHandle_t lock;
 static wl_handle_t wl = WL_INVALID_HANDLE;
-static bool mounted = false;
+static bool mounted = false;            // the internal partition
+static char base[160] = INTERNAL;       // where the books are: INTERNAL or "/sdcard/<folder>"
 static uint32_t generation = 1;
 
 static void path(char *out, size_t size, const char *id, const char *ext)
 {
-    snprintf(out, size, BASE "/%s.%s", id, ext);
+    snprintf(out, size, "%s/%s.%s", base, id, ext);
+}
+
+// Removes a book's pictures, <ID>.I00 .. <ID>.I99 (lock held)
+static void remove_pictures(const char *id)
+{
+    char p[192], ext[8];
+    for (int i = 0; i < BOOK_PICTURES_MAX; i++) {
+        snprintf(ext, sizeof(ext), "I%02d", i);
+        path(p, sizeof(p), id, ext);
+        remove(p);
+    }
+}
+
+// A book's file: <8 hex digits>.<3 characters> (TXT, IDX, CHP, I07, TMP ...)
+static bool is_book_file(const char *name)
+{
+    const char *dot = strchr(name, '.');
+    if (dot == NULL || dot - name != BOOK_ID_LEN || strlen(dot + 1) != 3) {
+        return false;
+    }
+    char id[BOOK_ID_LEN + 1];
+    memcpy(id, name, BOOK_ID_LEN);
+    id[BOOK_ID_LEN] = '\0';
+    return books_valid_id(id);
+}
+
+static bool copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    FILE *out = in ? fopen(to, "wb") : NULL;
+    char *buf = out ? malloc(8192) : NULL;
+    bool ok = buf != NULL;
+    size_t n;
+    while (ok && (n = fread(buf, 1, 8192, in)) > 0) {
+        ok = fwrite(buf, 1, n, out) == n;
+    }
+    free(buf);
+    if (out && fclose(out) != 0) {
+        ok = false;
+    }
+    if (in) {
+        fclose(in);
+    }
+    if (!ok) {
+        remove(to);
+    }
+    return ok;
+}
+
+// Moves every book file from folder `from` to folder `to` (renamed on the same file system,
+// copied then deleted between flash and card). Names are gathered a batch at a time, so the
+// folder isn't changed while it's being read. True if everything moved.
+static bool move_books(const char *from, const char *to)
+{
+    enum { BATCH = 64 };
+    char (*names)[16] = malloc(BATCH * sizeof(*names));
+    if (names == NULL) {
+        return false;
+    }
+    mkdir(to, 0777);
+    bool ok = true;
+    int moved = 0, failed = 0;
+    while (1) {
+        int n = 0;
+        DIR *d = opendir(from);
+        struct dirent *e;
+        while (d && n < BATCH && (e = readdir(d)) != NULL) {
+            if (is_book_file(e->d_name) && strlen(e->d_name) < sizeof(names[0])) {
+                memcpy(names[n++], e->d_name, strlen(e->d_name) + 1);
+            }
+        }
+        if (d) {
+            closedir(d);
+        }
+        if (n == 0) {
+            break;
+        }
+        int progress = 0;
+        for (int i = 0; i < n; i++) {
+            char a[200], b[200];
+            snprintf(a, sizeof(a), "%s/%s", from, names[i]);
+            snprintf(b, sizeof(b), "%s/%s", to, names[i]);
+            remove(b);                                      // a copy already there: replaced
+            if (rename(a, b) == 0 || (copy_file(a, b) && remove(a) == 0)) {
+                moved++;
+                progress++;
+            } else {
+                failed++;
+                ok = false;
+            }
+        }
+        if (progress == 0) {
+            break;                                          // nothing more can be moved (card full?)
+        }
+    }
+    free(names);
+    ESP_LOGI(TAG, "moved %d book files from %s to %s%s", moved, from, to, failed ? " (some failed)" : "");
+    return ok;
+}
+
+static bool on_card(void)
+{
+    return strncmp(base, SDCARD_ROOT "/", strlen(SDCARD_ROOT) + 1) == 0 || !strcmp(base, SDCARD_ROOT);
+}
+
+// The current location can be used: the partition is mounted, or the card is (mounted on
+// demand; the folder is made if missing)
+static bool ready(void)
+{
+    if (!on_card()) {
+        return mounted;
+    }
+    if (!sdcard_mount()) {
+        return false;
+    }
+    mkdir(base, 0777);
+    static bool migrated;                                   // once per start
+    if (!migrated && mounted) {
+        migrated = true;
+        move_books(INTERNAL, base);                         // books still in flash join the card's
+        generation++;
+    }
+    return true;
+}
+
+static void set_base(const char *card_dir)
+{
+    if (card_dir[0] == '\0') {
+        snprintf(base, sizeof(base), INTERNAL);
+    } else {
+        snprintf(base, sizeof(base), "%s%s", SDCARD_ROOT, strcmp(card_dir, "/") ? card_dir : "");
+    }
+}
+
+bool books_set_location(const char *card_dir)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    char old[160];
+    snprintf(old, sizeof(old), "%s", base);
+    bool old_card = on_card();
+    set_base(card_dir);
+    bool ok = true;
+    if (strcmp(old, base) != 0) {
+        if ((old_card || on_card()) && !sdcard_mount()) {
+            snprintf(base, sizeof(base), "%s", old);        // no card: stay where they are
+            ok = false;
+        } else {
+            ok = move_books(old, base);
+        }
+    }
+    if (ok || strcmp(old, base) != 0) {
+        settings_set_str(SETTING_BOOKS_DIR, card_dir);
+    }
+    generation++;
+    xSemaphoreGive(lock);
+    ESP_LOGI(TAG, "books in %s", base);
+    return ok;
+}
+
+void books_location(char *out, size_t size)
+{
+    settings_get_str(SETTING_BOOKS_DIR, out, size, SETTING_BOOKS_DIR_DEFAULT);
 }
 
 bool books_init(void)
@@ -36,12 +201,15 @@ bool books_init(void)
         .max_files = 4,
         .allocation_unit_size = 4096,
     };
-    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(BASE, PARTITION, &cfg, &wl);
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(INTERNAL, PARTITION, &cfg, &wl);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "mount failed: %s", esp_err_to_name(err));
         return false;
     }
     mounted = true;
+    char dir[128];
+    books_location(dir, sizeof(dir));
+    set_base(dir);
     uint64_t total, free_bytes;
     books_space(&total, &free_bytes);
     ESP_LOGI(TAG, "%llu KB free of %llu KB", free_bytes / 1024, total / 1024);
@@ -64,7 +232,7 @@ bool books_valid_id(const char *id)
 // Reads the title line and size of a book (lock held)
 static bool get_locked(const char *id, book_info_t *out)
 {
-    char p[32];
+    char p[192];
     path(p, sizeof(p), id, "TXT");
     FILE *f = fopen(p, "r");
     if (f == NULL) {
@@ -110,12 +278,9 @@ static int by_title(const void *a, const void *b)
 
 int books_list(book_info_t *out, int max)
 {
-    if (!mounted) {
-        return 0;
-    }
     int count = 0;
     xSemaphoreTake(lock, portMAX_DELAY);
-    DIR *dir = opendir(BASE);
+    DIR *dir = ready() ? opendir(base) : NULL;
     struct dirent *e;
     while (dir && count < max && (e = readdir(dir)) != NULL) {
         // "1A2B3C4D.TXT": take the 8-digit name of each .TXT file
@@ -143,7 +308,7 @@ int books_list(book_info_t *out, int max)
 
 bool books_get(const char *id, book_info_t *out)
 {
-    if (!mounted || !books_valid_id(id)) {
+    if (!books_valid_id(id) || !ready()) {
         return false;
     }
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -154,7 +319,7 @@ bool books_get(const char *id, book_info_t *out)
 
 int books_read(const char *id, uint32_t offset, void *buf, int len)
 {
-    char p[32];
+    char p[192];
     path(p, sizeof(p), id, "TXT");
     xSemaphoreTake(lock, portMAX_DELAY);
     int n = -1;
@@ -178,7 +343,7 @@ esp_err_t books_delete(const char *id)
     if (!books_valid_id(id)) {
         return ESP_ERR_INVALID_ARG;
     }
-    char p[32];
+    char p[192];
     xSemaphoreTake(lock, portMAX_DELAY);
     path(p, sizeof(p), id, "TXT");
     int r = remove(p);
@@ -187,6 +352,22 @@ esp_err_t books_delete(const char *id)
     path(p, sizeof(p), id, "CHP");
     remove(p);
     path(p, sizeof(p), id, "TMP");
+    remove(p);
+    remove_pictures(id);
+    path(p, sizeof(p), id, "SRC");                          // converted from a file in the folder:
+    FILE *src = fopen(p, "r");                              // that goes too, or it would come back
+    if (src) {
+        char name[200];
+        if (fgets(name, sizeof(name), src)) {
+            name[strcspn(name, "\r\n")] = '\0';
+            if (name[0] && !strchr(name, '/')) {
+                char orig[400];
+                snprintf(orig, sizeof(orig), "%s/%s", base, name);
+                remove(orig);
+            }
+        }
+        fclose(src);
+    }
     remove(p);
     generation++;
     xSemaphoreGive(lock);
@@ -211,12 +392,12 @@ esp_err_t books_upload_chunk(const char *id, uint32_t offset, uint32_t total,
 {
     *done = false;
     *have = 0;
-    if (!mounted || !books_valid_id(id) || total == 0 || total > MAX_SIZE
-        || offset + (uint32_t)len > total) {
+    if (!books_valid_id(id) || total == 0 || total > MAX_SIZE
+        || offset + (uint32_t)len > total || !ready()) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    char tmp[32];
+    char tmp[192];
     path(tmp, sizeof(tmp), id, "TMP");
     esp_err_t result = ESP_OK;
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -250,13 +431,14 @@ esp_err_t books_upload_chunk(const char *id, uint32_t offset, uint32_t total,
     *have = offset + len;
 
     if (*have == total) {                                   // last chunk: becomes the book
-        char txt[32], idx[32];
+        char txt[192], idx[192];
         path(txt, sizeof(txt), id, "TXT");
         path(idx, sizeof(idx), id, "IDX");
         remove(txt);
         remove(idx);                                        // old page index no longer matches
         path(idx, sizeof(idx), id, "CHP");
         remove(idx);                                        // nor the chapter list
+        remove_pictures(id);                                // the new book's pictures follow
         if (rename(tmp, txt) != 0) {
             result = ESP_FAIL;
             goto out;
@@ -273,8 +455,12 @@ out:
 void books_space(uint64_t *total, uint64_t *free_bytes)
 {
     *total = *free_bytes = 0;
-    if (mounted) {
-        esp_vfs_fat_info(BASE, total, free_bytes);
+    if (on_card()) {
+        if (sdcard_mount()) {
+            esp_vfs_fat_info(SDCARD_ROOT, total, free_bytes);
+        }
+    } else if (mounted) {
+        esp_vfs_fat_info(INTERNAL, total, free_bytes);
     }
 }
 
@@ -317,7 +503,7 @@ void books_mark_opened(const char *id)
 
 int books_read_index(const char *id, uint32_t *out, int max)
 {
-    char p[32];
+    char p[192];
     path(p, sizeof(p), id, "IDX");
     xSemaphoreTake(lock, portMAX_DELAY);
     int count = -1;
@@ -332,7 +518,7 @@ int books_read_index(const char *id, uint32_t *out, int max)
 
 esp_err_t books_write_index(const char *id, const uint32_t *pages, int count)
 {
-    char p[32], txt[32];
+    char p[192], txt[192];
     path(p, sizeof(p), id, "IDX");
     path(txt, sizeof(txt), id, "TXT");
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -352,7 +538,7 @@ esp_err_t books_write_index(const char *id, const uint32_t *pages, int count)
 
 int books_read_extra(const char *id, const char *ext, void *buf, int max)
 {
-    char p[32];
+    char p[192];
     path(p, sizeof(p), id, ext);
     xSemaphoreTake(lock, portMAX_DELAY);
     int n = -1;
@@ -367,7 +553,7 @@ int books_read_extra(const char *id, const char *ext, void *buf, int max)
 
 esp_err_t books_write_extra(const char *id, const char *ext, const void *data, int len)
 {
-    char p[32], txt[32];
+    char p[192], txt[192];
     path(p, sizeof(p), id, ext);
     path(txt, sizeof(txt), id, "TXT");
     xSemaphoreTake(lock, portMAX_DELAY);
@@ -383,4 +569,23 @@ esp_err_t books_write_extra(const char *id, const char *ext, const void *data, i
     }
     xSemaphoreGive(lock);
     return result;
+}
+
+void books_extra_path(const char *id, const char *ext, char *out, size_t size)
+{
+    path(out, size, id, ext);
+}
+
+bool books_base_ready(char *out, size_t size)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool ok = ready();
+    snprintf(out, size, "%s", base);
+    xSemaphoreGive(lock);
+    return ok;
+}
+
+void books_changed(void)
+{
+    generation++;
 }

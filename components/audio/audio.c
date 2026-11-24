@@ -1,5 +1,6 @@
 #include "audio.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
@@ -158,6 +159,10 @@ bool audio_start(uint32_t rate)
     }
     if (running && rate == cur_rate) {
         return true;
+    }
+    if (audio_recording()) {
+        ESP_LOGW(TAG, "can't play while recording");
+        return false;
     }
     if (running) {
         audio_drain();
@@ -331,4 +336,160 @@ void audio_stop(void)
 bool audio_running(void)
 {
     return running;
+}
+
+// ---------- microphone (INMP441) ----------
+//
+// The microphone shares BCLK / WS with the DAC, so it uses I2S0 too, as a receive-only
+// channel, and only while playback is stopped. Its data is 24 bits, MSB first, in the left
+// half of a 32-bit stereo frame (L/R tied to GND).
+
+#define PIN_DIN         3
+#define MIC_SETTLE_MS   120                     // the INMP441 outputs garbage for ~85 ms after its clock starts
+
+static i2s_chan_handle_t rx;
+static int32_t *rx_buf;
+static size_t rx_buf_frames;
+static int32_t hp_x, hp_y;                      // high-pass filter state (removes the DC offset)
+static int mic_gain = 16;                       // x16 = +24 dB: speech at arm's length
+
+bool audio_rec_start(uint32_t rate)
+{
+    if (!init_once()) {
+        return false;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool ok = false;
+    if (running || rx) {
+        ESP_LOGW(TAG, "microphone: I2S is busy (playback running?)");
+        goto out;
+    }
+    i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan.dma_desc_num = 6;
+    chan.dma_frame_num = 256;
+    if (i2s_new_channel(&chan, NULL, &rx) != ESP_OK) {
+        rx = NULL;
+        goto out;
+    }
+    i2s_std_config_t std = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = PIN_BCLK,
+            .ws = PIN_WS,
+            .dout = I2S_GPIO_UNUSED,
+            .din = PIN_DIN,
+        },
+    };
+    std.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    if (i2s_channel_init_std_mode(rx, &std) != ESP_OK || i2s_channel_enable(rx) != ESP_OK) {
+        i2s_del_channel(rx);
+        rx = NULL;
+        goto out;
+    }
+    hp_x = hp_y = 0;
+    ok = true;
+    ESP_LOGI(TAG, "microphone on at %lu Hz", (unsigned long)rate);
+out:
+    xSemaphoreGive(lock);
+    if (ok) {
+        int16_t junk[256];                                  // let the microphone settle
+        int64_t frames = (int64_t)rate * MIC_SETTLE_MS / 1000;
+        while (frames > 0) {
+            size_t n = audio_rec_read(junk, frames < 256 ? frames : 256);
+            if (n == 0) {
+                break;
+            }
+            frames -= n;
+        }
+        hp_x = hp_y = 0;
+    }
+    return ok;
+}
+
+size_t audio_rec_read(int16_t *out, size_t frames)
+{
+    if (rx == NULL) {
+        return 0;
+    }
+    if (rx_buf_frames < frames) {
+        free(rx_buf);
+        rx_buf = heap_caps_malloc(frames * sizeof(int32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        rx_buf_frames = rx_buf ? frames : 0;
+        if (rx_buf == NULL) {
+            return 0;
+        }
+    }
+    size_t bytes = 0;
+    if (i2s_channel_read(rx, rx_buf, frames * sizeof(int32_t), &bytes, pdMS_TO_TICKS(500)) != ESP_OK && bytes == 0) {
+        return 0;
+    }
+    size_t n = bytes / sizeof(int32_t);
+    for (size_t i = 0; i < n; i++) {
+        int32_t x = rx_buf[i] >> 8;                         // 24-bit sample
+        // First-order high-pass (~10 Hz): y = x - x_prev + 0.996 y_prev
+        int32_t y = x - hp_x + (int32_t)(((int64_t)hp_y * 1020) >> 10);
+        hp_x = x;
+        hp_y = y;
+        int32_t v = (int32_t)(((int64_t)y * mic_gain) >> 8);   // 24 -> 16 bits, with gain
+        out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v;
+    }
+    return n;
+}
+
+void audio_rec_stop(void)
+{
+    if (lock == NULL) {
+        return;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (rx) {
+        i2s_channel_disable(rx);
+        i2s_del_channel(rx);
+        rx = NULL;
+        gpio_config_t off = {
+            .pin_bit_mask = (1ULL << PIN_BCLK) | (1ULL << PIN_WS) | (1ULL << PIN_DIN),
+            .mode = GPIO_MODE_DISABLE,
+        };
+        gpio_config(&off);
+        ESP_LOGI(TAG, "microphone off");
+    }
+    xSemaphoreGive(lock);
+    free(rx_buf);
+    rx_buf = NULL;
+    rx_buf_frames = 0;
+}
+
+bool audio_recording(void)
+{
+    return rx != NULL;
+}
+
+// ---------- headset detection ----------
+
+bool audio_headset_init(void)
+{
+    if (!init_once()) {
+        return false;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool ok = tlv320_headset_init();
+    xSemaphoreGive(lock);
+    return ok;
+}
+
+int audio_headset_poll(bool *plugged, bool *pressed)
+{
+    if (lock == NULL) {
+        return -1;
+    }
+    bool button = false, plug = false;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    bool ok = tlv320_headset_poll(plugged, pressed, &button, &plug);
+    xSemaphoreGive(lock);
+    if (!ok) {
+        return -1;
+    }
+    return (button ? AUDIO_HEADSET_BUTTON : 0) | (plug ? AUDIO_HEADSET_PLUG : 0);
 }

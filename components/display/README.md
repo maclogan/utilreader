@@ -28,7 +28,7 @@ The panel is physically portrait (128×296); `epd_draw_pixel()` rotates for you.
 
 | | `epd_display()` (full) | `epd_display_partial()` |
 |---|---|---|
-| Time | ~3 s | ~0.6 s |
+| Time | ~3 s (~1.5 s fast, ~2.3 s grey) | ~0.6 s |
 | Looks | Flashes black/white | Only changed pixels change |
 | Ghosting | Clears it | Builds up a little each time |
 | Needs | `epd_init()` first | A previous `epd_display()` and an awake panel |
@@ -49,6 +49,22 @@ an accurate "previous" picture. A partial refresh also updates the "previous" RA
 panel what is already on screen. `components/power` uses it after the panel lost power:
 it redraws the known "off" screen, loads it as the base, then changes one line with a
 partial refresh.
+
+### Refreshes run in the background
+
+`epd_display()` and `epd_display_partial()` don't wait for the panel: they copy the frame
+buffer and return at once, and a display task (`epd`) drives the panel. The app can handle
+the next button press and draw the next screen straight away. Requests that arrive while
+the panel is still busy merge into one: when it's free, the task shows the **latest** frame
+(a full refresh if any of the merged requests asked for one). So five quick presses move the
+cursor five places at once and cost at most two refreshes, instead of five refreshes played
+back one after another. `epd_wait_idle()` waits until the panel has caught up;
+`epd_sleep()`, `epd_power_down()` and `epd_display_base()` do it themselves. `epd_init()`
+no longer resets the panel on the spot: the task does it before the next refresh.
+
+Leaving a grey screen: a partial refresh can't clear grey pixels whose black/white value
+stays the same (light grey becomes "white"), so a partial request for a frame without grey,
+right after a grey full refresh, is turned into a full refresh.
 
 ### Sleep and power
 
@@ -157,9 +173,36 @@ SPI2 at 4 MHz, write-only.
 The panel is Waveshare's 2.9" V2 module with an SSD16xx-family controller (the same
 command set as the SSD1680), 128 sources × 296 gates. The driver uses the chip's built-in
 waveforms: full refresh with 0x22 0xF7, partial with 0x22 0xFF after writing the new image
-to RAM 0x24 while RAM 0x26 holds the previous one. Waveshare's own driver has a third,
-"fast" full refresh (temperature register forced to 100 °C, 0x22 0xC7) that this driver
-doesn't use. The panel can also show 4 grey levels, which this driver doesn't use either.
+to RAM 0x24 while RAM 0x26 holds the previous one. With *menuconfig → Hardware → Fast
+full refresh* (on by default), black/white full refreshes use Waveshare's "fast" variant
+instead: the temperature register is forced to 100 °C (0x1A 0x64), which makes the chip load
+its short waveform (0x22 0x91), then 0x22 0xC7. It takes roughly half as long and flashes
+less, but clears ghosting less well, so every 10th full refresh is still the normal one. The
+log says which ran and how long it took (`fast refresh took ... ms`).
+
+## Grey (4 levels)
+
+The panel can show 4 levels: black, dark grey, light grey, white. Each pixel's level is kept
+in two planes: the usual `frame` holds the high bit (1 = light grey or white) and `grey_lo`
+the low bit; plain black/white drawing sets both, so nothing else changes for code that
+doesn't use grey.
+
+```c
+epd_draw_pixel_grey(x, y, EPD_GREY_DARK);                  // one pixel, level 0..3
+epd_draw_grey8(x, y, w, h, pixels, w, true);               // 8-bit picture, dithered to 4 greys
+epd_draw_grey8(x, y, w, h, pixels, w, false);              // ... or to black and white
+```
+
+`epd_draw_grey8()` uses Floyd-Steinberg error diffusion. `components/image` turns JPEGs into
+the 8-bit pictures it takes.
+
+When the frame has any grey pixel, `epd_display()` uses the grey refresh instead (Waveshare's
+`Gray4` waveform, loaded into the controller with 0x32; ~2.3 s): RAM 0x24 gets the inverted
+low plane and 0x26 the inverted high plane, so (0x26, 0x24) = 00 white, 01 light grey, 10 dark
+grey, 11 black. Afterwards the controller is reset back to its built-in waveforms and both
+RAMs get the black/white frame, so a following `epd_display_partial()` works as usual: it only
+drives pixels that changed, and grey pixels it doesn't touch stay grey. Grey drawn into a
+partial frame shows as black or white until the next full refresh.
 
 ## Orientation
 

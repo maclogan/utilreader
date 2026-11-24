@@ -7,17 +7,46 @@
 #include "epd.h"                        // drawing primitives + display refresh
 #include "font16.h"                     // the time in the status bar
 #include "local_time.h"                 // local_time_format_hm()
+#include "settings.h"                   // the layout (rows x columns), set on the web page
 #include "ui_sidebar.h"                 // status bar on the left
 
 // Tile layout (pixels). The screen is 296 wide x 128 tall; the status bar takes the left
-// UI_SIDEBAR_W columns.
-#define TILE_W      58                  // tile width
-#define TILE_H      64                  // tile height
-#define TILE_GAP    6                   // space between tiles
-#define TILE_Y      22                  // top edge of the tiles
+// UI_SIDEBAR_W columns. One row: 58 x 64 tiles with a hint line below. Two rows: smaller tiles
+// filling the height, no hint.
 #define LABEL_H     13                  // height of the label strip at the bottom of a tile
-#define MAX_TILES   4                   // tiles that fit across; with more apps the row scrolls
-#define HINT_Y      (EPD_HEIGHT - 14)   // hint line at the bottom
+#define HINT_Y      (EPD_HEIGHT - 14)   // hint line at the bottom (one row only)
+#define ARROW_W     7                   // room at each side for the page arrows
+
+typedef struct {
+    int rows, cols;                     // grid
+    int w, h, gap;                      // tile size and spacing
+    int y;                              // top of the first row
+} layout_t;
+
+static layout_t tile;                   // the layout being drawn (draw_tile uses its size)
+
+// The layout chosen on the web page (MENU_ROWS / MENU_COLS settings), clamped to what fits
+static layout_t get_layout(void)
+{
+    layout_t l;
+    l.rows = settings_get_i32(SETTING_MENU_ROWS, 2) >= 2 ? 2 : 1;
+    l.cols = settings_get_i32(SETTING_MENU_COLS, 4);
+    l.cols = l.cols < 3 ? 3 : l.cols > 5 ? 5 : l.cols;
+    l.gap = l.rows == 1 ? 6 : 4;
+    int room = UI_CONTENT_W - 2 * ARROW_W;
+    l.w = (room - (l.cols - 1) * l.gap) / l.cols;
+    if (l.w > 64) {
+        l.w = 64;
+    }
+    if (l.rows == 1) {
+        l.h = 64;
+        l.y = 22;
+    } else {
+        l.h = (EPD_HEIGHT - 4 - l.gap) / 2;                 // 60 px each, 2 px margins
+        l.y = 2;
+    }
+    return l;
+}
 
 static long drawn_minute = -1;          // minute (since 1970) the status bar shows; -1 = no time
 
@@ -64,6 +93,7 @@ static void draw_status(void)
 // Draws one tile with its top-left corner at (x, y)
 static void draw_tile(int x, int y, const app_t *item, bool highlighted)
 {
+    const int TILE_W = tile.w, TILE_H = tile.h;
     int cx = x + TILE_W / 2;                                // horizontal center of the tile
     int label_y = y + TILE_H - LABEL_H;                     // top of the label strip
 
@@ -90,28 +120,43 @@ void menu_ui_show(const app_t *const apps[], int count, int selected, bool full)
     }
     epd_clear(EPD_WHITE);
 
-    // Show up to MAX_TILES tiles, scrolled so the selected one is visible
-    int visible = count < MAX_TILES ? count : MAX_TILES;
-    int first = selected < visible ? 0 : selected - visible + 1;
-
-    // Center the row of tiles in the space right of the status bar
-    int row_w = visible * TILE_W + (visible - 1) * TILE_GAP;
-    int x = UI_CONTENT_X + (UI_CONTENT_W - row_w) / 2;
-    for (int i = first; i < first + visible; i++) {
-        draw_tile(x, TILE_Y, apps[i], i == selected);
-        x += TILE_W + TILE_GAP;
+    // A page of rows x cols tiles, filled row by row. Left / right walk the highlight across
+    // the page; going past its last (or first) tile turns to the next (or previous) page.
+    tile = get_layout();
+    int per_page = tile.rows * tile.cols;
+    int pages = (count + per_page - 1) / per_page;
+    int page = selected / per_page, first = page * per_page;
+    int on_page = count - first < per_page ? count - first : per_page;
+    int cols_used = on_page < tile.cols ? on_page : tile.cols;   // a short single row is centred
+    int grid_w = (pages > 1 ? tile.cols : cols_used) * tile.w + ((pages > 1 ? tile.cols : cols_used) - 1) * tile.gap;
+    int x0 = UI_CONTENT_X + (UI_CONTENT_W - grid_w) / 2;
+    int rows_used = (on_page + tile.cols - 1) / tile.cols;
+    int y0 = tile.y + (tile.rows == 2 && rows_used == 1 && pages == 1 ? (tile.h + tile.gap) / 2 : 0);
+    for (int i = 0; i < on_page; i++) {
+        int r = i / tile.cols, c = i % tile.cols;
+        draw_tile(x0 + c * (tile.w + tile.gap), y0 + r * (tile.h + tile.gap), apps[first + i], first + i == selected);
     }
 
-    // Arrows when more apps are off-screen to either side
-    int mid_y = TILE_Y + TILE_H / 2 - 7;
-    if (first > 0) {
-        epd_draw_text(UI_CONTENT_X + 2, mid_y, "<", 2, EPD_BLACK);
-    }
-    if (first + visible < count) {
-        epd_draw_text(EPD_WIDTH - 12, mid_y, ">", 2, EPD_BLACK);
+    // Arrows when there are pages to either side
+    if (pages > 1) {
+        int mid_y = tile.y + (tile.rows * tile.h + (tile.rows - 1) * tile.gap) / 2 - 4;
+        if (page > 0) {
+            epd_draw_text(UI_CONTENT_X + 1, mid_y, "<", 1, EPD_BLACK);
+        }
+        if (page < pages - 1) {
+            epd_draw_text(EPD_WIDTH - 6, mid_y, ">", 1, EPD_BLACK);
+        }
     }
 
-    text_centered(UI_CONTENT_CX, HINT_Y, "< > choose   press: open", 1, EPD_BLACK);  // hint
+    if (tile.rows == 1) {
+        char hint[64];
+        if (pages > 1) {
+            snprintf(hint, sizeof(hint), "< > choose   press: open   %d/%d", page + 1, pages);
+        } else {
+            snprintf(hint, sizeof(hint), "< > choose   press: open");
+        }
+        text_centered(UI_CONTENT_CX, HINT_Y, hint, 1, EPD_BLACK);
+    }
     draw_status();
 
     if (full) {

@@ -1,7 +1,9 @@
-# app_flashcards: the Flashcards app
+# app_flashcards: flashcard review (part of the Story app)
 
-Spaced-repetition review of the words saved in the story app (`components/review`).
-The menu tile is called **Cards**.
+Spaced-repetition review of the words saved in the story app (`components/review`). It has
+no menu tile of its own: open it from the Story app's menu, **Review cards** (with the number
+due today), and BACK returns there. `flashcards_start()` / `flashcards_button()` /
+`flashcards_due_count()` are what the Story app calls.
 
 | File | What it does |
 |---|---|

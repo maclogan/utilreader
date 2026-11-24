@@ -27,7 +27,7 @@ static const char *TAG = "music";
 #define QUEUE_FILE      SDCARD_ROOT "/.musicq"   // the queue, as card paths, for resuming
 
 #define SEEK_STEP_MS    10000
-#define TICK_MS         10000           // Now playing: time updated this often
+#define TICK_MS         30000           // Now playing: time updated this often (each update nudges the grey cover)
 #define SAVE_EVERY_MS   (2 * 60 * 1000) // position saved this often while playing
 
 // ---------- the menu tree ----------
@@ -272,14 +272,15 @@ static void play(const int *tracks, int n, int pos, uint32_t start_ms)
 
 // ---------- building the views ----------
 
+// Now Playing first (while something plays or can be resumed), then the library
 static void build_root(void)
 {
     root_count = 0;
-    for (int i = R_PLAYLISTS; i <= R_SHUFFLE; i++) {
-        root_items[root_count++] = i;
-    }
     if (music_active() || resume_available) {
         root_items[root_count++] = R_PLAYING;
+    }
+    for (int i = R_PLAYLISTS; i <= R_SHUFFLE; i++) {
+        root_items[root_count++] = i;
     }
     root_items[root_count++] = R_RESCAN;
 }
@@ -385,11 +386,15 @@ static void show_status_message(musicdb_status_t s)
 // Scans if the folder is new or `force`. Returns true when there's music.
 static bool ensure_library(bool force)
 {
+    static uint32_t scanned_generation;                     // sdcard_generation() at the last scan
     char dir[64];
     settings_get_str(MUSIC_DIR_KEY, dir, sizeof(dir), MUSIC_DIR_DEFAULT);
-    if (!force && musicdb_status() == MUSICDB_OK && !strcmp(dir, musicdb_dir())) {
+    sdcard_mount();                                         // notices a card that was swapped
+    if (!force && musicdb_status() == MUSICDB_OK && !strcmp(dir, musicdb_dir()) &&
+        scanned_generation == sdcard_generation() && !musicdb_stale()) {
         return true;
     }
+    scanned_generation = sdcard_generation();
     if (music_active()) {
         save_place();
         player_stop();                                      // track indices are about to change
@@ -560,7 +565,13 @@ static bool list_button(button_event_t event)
         return true;
     case BUTTON_WAKE:
         if (CUR.view == V_ROOT && (music_active() || resume_available) != (root_count == 7)) {
+            int was = root_items[CUR.sel];                  // keep the same item highlighted
             load_view();                                    // Now Playing appeared or went
+            for (int i = 0; i < root_count; i++) {
+                if (root_items[i] == was) {
+                    CUR.sel = i;
+                }
+            }
         }
         draw_list(false);                                   // the playing mark moved
         return true;
@@ -646,17 +657,28 @@ static bool music_button(const app_t *self, button_event_t event)
 
 static TickType_t music_next_wakeup(const app_t *self)
 {
-    if (CUR.view != V_PLAYING || !music_active()) {
+    if (CUR.view != V_PLAYING) {
         return portMAX_DELAY;
     }
-    player_status_t ps;
-    player_status(&ps);
-    return ps.paused ? portMAX_DELAY : app_ticks_until(next_tick);
+    TickType_t wait = media_ui_marquee_wait();              // long lines scroll, even when paused
+    if (music_active()) {
+        player_status_t ps;
+        player_status(&ps);
+        if (!ps.paused) {
+            TickType_t t = app_ticks_until(next_tick);
+            wait = t < wait ? t : wait;
+        }
+    }
+    return wait;
 }
 
 static void music_tick(const app_t *self)
 {
-    if (CUR.view == V_PLAYING && app_due(next_tick)) {
+    if (CUR.view != V_PLAYING) {
+        return;
+    }
+    bool scroll = media_ui_marquee_step();
+    if (scroll || (music_active() && app_due(next_tick))) {
         draw_playing(false);
     }
 }

@@ -9,6 +9,6 @@
 
 #define STORAGE_PATH "/store"
 
-// Mounts the partition, formatting it on first use. Call once at startup.
+// Mounts the partition, formatting it on first use. Call at startup (again is harmless).
 // Returns false if it can't be mounted (apps then find no files).
 bool storage_init(void);

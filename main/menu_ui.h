@@ -19,7 +19,9 @@
 #include "app.h"                        // app_t
 #include "freertos/FreeRTOS.h"          // TickType_t
 
-// Draws the menu with apps[selected] highlighted. Shows up to 4 tiles; more scroll.
+// Draws the menu with apps[selected] highlighted: a page of tiles in the layout chosen on the
+// web page (1 or 2 rows of 3-5, SETTING_MENU_ROWS / SETTING_MENU_COLS); more apps go on
+// further pages, which turn as the highlight moves past a page's last or first tile.
 // full = true: full refresh (use when switching to the menu from another screen).
 // full = false: quick partial refresh (use when only the highlight moved).
 void menu_ui_show(const app_t *const apps[], int count, int selected, bool full);

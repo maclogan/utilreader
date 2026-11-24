@@ -25,12 +25,12 @@
 #include "ui_sidebar.h"                // ui_sidebar_set_battery()
 #include "epd.h"                  // halt() screen
 #include "esp_log.h"
-#include "flashcards_app.h"
 #include "music_app.h"
 #include "podcasts_app.h"
 #include "reader_app.h"
 #include "settings_app.h"
 #include "transfer_app.h"
+#include "voice_app.h"
 #include "esp_netif_sntp.h"             // internet time (SNTP)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"              // vTaskDelay(), xTaskGetTickCount()
@@ -53,10 +53,10 @@ static const char *TAG = "main";
 static void register_apps(void)
 {
     app_registry_add(&story_app, false);
-    app_registry_add(&flashcards_app, false);
     app_registry_add(&reader_app, false);
     app_registry_add(&music_app, false);
     app_registry_add(&podcasts_app, false);
+    app_registry_add(&voice_app, false);
     app_script_init();                                      // Weather, Clock and any installed apps
     app_registry_add(&transfer_app, true);
     app_registry_add(&settings_app, true);
@@ -169,6 +169,8 @@ void app_main(void)
     // Screen orientation before anything is drawn (power_boot_check() redraws the "off"
     // screen exactly as it was left)
     epd_set_rotated(settings_get_i32(SETTING_ROTATE_180, epd_rotated()));  // default: menuconfig
+    epd_set_picture_gamma(settings_get_i32(SETTING_PICTURE_GAMMA, epd_picture_gamma()));
+    epd_set_partial_mode(settings_get_i32(SETTING_PARTIAL_MODE, EPD_PARTIAL_STOCK));
     power_boot_check();                                     // woken from "off": on only if BACK is held
 #if CONFIG_DISPLAY_DIAGNOSTIC
     vTaskDelay(pdMS_TO_TICKS(4000));                        // time to open the serial log after a reset

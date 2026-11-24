@@ -8,6 +8,14 @@
 
 ## On the card
 
+The folder is chosen in **Settings > Podcasts** (default `/Podcasts`); `podcasts_root()` gives
+it. Choosing another folder moves the feed list and the feeds' folders there
+(`podcasts_set_root()`), leaving anything else alone.
+
+Each feed's folder also gets the show's artwork, `cover.jpg` (from `<itunes:image>`, fetched
+once per artwork URL, remembered in `cover.url`; only JPEGs are kept). Now Playing shows it for
+the show's episodes, as it shows a music folder's `cover.jpg`.
+
 ```
 /sdcard/Podcasts/feeds.tsv               feeds: id, options, url, title, ETag, Last-Modified, last update, error
 /sdcard/Podcasts/<feed id>/episodes.tsv  every episode seen (newest 300): id, date, sizes, position, flags, title, URL

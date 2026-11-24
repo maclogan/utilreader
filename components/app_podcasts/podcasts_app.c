@@ -17,7 +17,7 @@
 
 static const char *TAG = "podcasts_app";
 
-#define TICK_MS         10000           // Now Playing: time updated this often
+#define TICK_MS         30000           // Now Playing: time updated this often (each update nudges the grey cover)
 #define SAVE_EVERY_MS   (2 * 60 * 1000)
 #define MAX_QUEUE       PODCASTS_MAX_EPISODES
 
@@ -90,6 +90,10 @@ static void pod_finished(int id)
 static const player_source_t src_next = {.get = pod_get, .finished = pod_finished, .advance = true};
 static const player_source_t src_stop = {.get = pod_get, .finished = pod_finished, .advance = false};
 
+// An episode was queued since the app opened: Now Playing stays on the list even if it
+// stopped because of a problem (no DAC yet, a bad file), as in the Music app
+static bool pod_queued;
+
 static bool pod_active(void)
 {
     player_status_t ps;
@@ -122,7 +126,7 @@ static void load_root(void)
     }
     ep_count = 0;                                           // eps was borrowed for counting
     root_count = 0;
-    if (pod_active()) {
+    if (pod_active() || pod_queued) {
         root_rows[root_count++] = ROOT_PLAYING;
     }
     for (int i = 0; i < feed_count; i++) {
@@ -277,6 +281,7 @@ static void play_episode(int pos)
     qstart = pos;
     snprintf(playing_feed_title, sizeof(playing_feed_title), "%s", feeds[open_feed].title);
     player_play_queue(o.after_next ? &src_next : &src_stop, ids, ep_count, pos, PLAYER_ITEM_START);
+    pod_queued = true;
 }
 
 static void open_root(bool full)
@@ -480,17 +485,28 @@ static bool podcasts_button(const app_t *self, button_event_t event)
 
 static TickType_t podcasts_next_wakeup(const app_t *self)
 {
-    if (CUR.view != V_PLAYING || !pod_active()) {
+    if (CUR.view != V_PLAYING) {
         return portMAX_DELAY;
     }
-    player_status_t ps;
-    player_status(&ps);
-    return ps.paused ? portMAX_DELAY : app_ticks_until(next_tick);
+    TickType_t wait = media_ui_marquee_wait();              // long lines scroll, even when paused
+    if (pod_active()) {
+        player_status_t ps;
+        player_status(&ps);
+        if (!ps.paused) {
+            TickType_t t = app_ticks_until(next_tick);
+            wait = t < wait ? t : wait;
+        }
+    }
+    return wait;
 }
 
 static void podcasts_tick(const app_t *self)
 {
-    if (CUR.view == V_PLAYING && app_due(next_tick)) {
+    if (CUR.view != V_PLAYING) {
+        return;
+    }
+    bool scroll = media_ui_marquee_step();
+    if (scroll || (pod_active() && app_due(next_tick))) {
         draw(false);
     }
 }
@@ -510,20 +526,35 @@ static void podcasts_close(const app_t *self)
 }
 
 // Menu icon: a microphone with sound waves
+// Thick arcs (3 px) of radius r around (cx, cy), on the left and right only: the parts within
+// about 50 degrees of horizontal, like radio waves going out both ways
+static void wave_arcs(int cx, int cy, int r)
+{
+    for (int dy = -r - 3; dy <= r + 3; dy++) {
+        for (int dx = -r - 3; dx <= r + 3; dx++) {
+            int d2 = dx * dx + dy * dy;
+            int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+            if (d2 >= r * r && d2 <= (r + 3) * (r + 3) && ay * 5 <= ax * 6) {   // |dy| <= 1.2 |dx|
+                epd_draw_pixel(cx + dx, cy + dy, EPD_BLACK);
+            }
+        }
+    }
+}
+
+// Menu icon: a broadcast mark (a dot sending waves both ways, on a small stand): unlike
+// the Voice app's microphone
 static void podcasts_icon(const app_t *self, int cx, int cy)
 {
-    epd_draw_rect(cx - 5, cy - 15, 11, 18, EPD_BLACK, true);              // capsule
-    epd_fill_circle(cx, cy - 15, 5, EPD_BLACK);
-    epd_fill_circle(cx, cy + 3, 5, EPD_BLACK);
-    for (int t = 0; t < 2; t++) {
-        epd_draw_line(cx - 10 + t, cy - 2, cx - 10 + t, cy + 4, EPD_BLACK);   // cradle
-        epd_draw_line(cx + 9 + t, cy - 2, cx + 9 + t, cy + 4, EPD_BLACK);
-        epd_draw_line(cx - 10, cy + 10 + t, cx + 10, cy + 10 + t, EPD_BLACK);
-        epd_draw_line(cx + t, cy + 10, cx + t, cy + 15, EPD_BLACK);        // stand
+    int my = cy - 4;                                        // centre of the waves
+    epd_fill_circle(cx, my, 4, EPD_BLACK);
+    wave_arcs(cx, my, 8);
+    wave_arcs(cx, my, 15);
+    for (int t = -1; t <= 1; t++) {                         // stand: a stem widening to a base
+        epd_draw_line(cx + t, my + 4, cx + t, cy + 13, EPD_BLACK);
     }
-    epd_draw_line(cx - 7, cy + 15, cx + 7, cy + 15, EPD_BLACK);
-    epd_draw_line(cx - 10, cy + 4, cx - 5, cy + 10, EPD_BLACK);
-    epd_draw_line(cx + 10, cy + 4, cx + 5, cy + 10, EPD_BLACK);
+    epd_draw_line(cx - 2, cy + 9, cx - 6, cy + 14, EPD_BLACK);
+    epd_draw_line(cx + 2, cy + 9, cx + 6, cy + 14, EPD_BLACK);
+    epd_draw_rect(cx - 7, cy + 14, 15, 3, EPD_BLACK, true);
 }
 
 const app_t podcasts_app = {
